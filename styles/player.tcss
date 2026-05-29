@@ -1,0 +1,177 @@
+/* ================================================================
+   Tidal TUI — Terminal Stylesheet
+   ================================================================
+   Dark theme inspired by Spotify, optimized for terminal rendering.
+   Colors: deep navy background, green (#1DB954) accents.
+   ================================================================ */
+
+/* -- Global -------------------------------------------------------- */
+
+Screen {
+    background: #0b0b14;
+    color: #d4d4d8;
+}
+
+Header {
+    background: #12121e;
+    color: #1DB954;
+}
+
+Footer {
+    background: #12121e;
+    color: #808090;
+}
+
+/* -- Main Layout --------------------------------------------------- */
+
+#main-container {
+    height: 1fr;
+}
+
+/* -- Sidebar (Playlist Browser) ------------------------------------ */
+
+#sidebar {
+    width: 34;
+    background: #0f0f1a;
+    border-right: thick #1e1e30;
+}
+
+#sidebar-title {
+    color: #707085;
+    text-style: bold;
+    height: 2;
+    padding: 1 0 0 0;
+}
+
+#sidebar ListView {
+    background: transparent;
+    scrollbar-color: #2a2a40;
+    scrollbar-color-hover: #3a3a55;
+    scrollbar-color-active: #1DB954;
+}
+
+#sidebar ListItem {
+    padding: 0 1;
+    height: 2;
+    color: #b0b0c0;
+}
+
+#sidebar ListItem:hover {
+    background: #1a1a2a;
+}
+
+#sidebar ListView:focus > ListItem.--highlight {
+    background: #1DB95425;
+    color: #1DB954;
+    text-style: bold;
+}
+
+/* -- Content (Track List) ------------------------------------------ */
+
+#content {
+    width: 1fr;
+    background: #0b0b14;
+}
+
+#track-header {
+    color: #e0e0e8;
+    text-style: bold;
+    height: 2;
+    padding: 1 0 0 0;
+}
+
+#track-table {
+    background: transparent;
+    scrollbar-color: #2a2a40;
+    scrollbar-color-hover: #3a3a55;
+    scrollbar-color-active: #1DB954;
+}
+
+DataTable > .datatable--header {
+    background: #15151f;
+    color: #808090;
+    text-style: bold;
+}
+
+DataTable > .datatable--cursor {
+    background: #1DB95430;
+    color: #ffffff;
+}
+
+DataTable > .datatable--hover {
+    background: #1a1a2830;
+}
+
+DataTable > .datatable--even-row {
+    background: #0e0e18;
+}
+
+DataTable > .datatable--odd-row {
+    background: #0b0b14;
+}
+
+/* -- Now Playing Bar ----------------------------------------------- */
+
+#now-playing-bar {
+    height: 4;
+    background: #12121e;
+    border-top: thick #1e1e30;
+    padding: 0 1;
+    layout: vertical;
+}
+
+#np-track-info {
+    color: #ffffff;
+    text-style: bold;
+    height: 1;
+}
+
+#np-progress-row {
+    height: 2;
+    align-vertical: middle;
+    padding: 0 0;
+}
+
+#np-time-current,
+#np-time-total {
+    width: auto;
+    min-width: 7;
+    color: #808090;
+    content-align-vertical: middle;
+}
+
+#np-volume {
+    width: auto;
+    min-width: 10;
+    color: #808090;
+    content-align-vertical: middle;
+    text-align: right;
+}
+
+/* -- Progress Bar Styling ------------------------------------------ */
+
+ProgressBar {
+    width: 1fr;
+    padding: 0;
+}
+
+ProgressBar Bar {
+    width: 1fr;
+}
+
+Bar > .bar--bar {
+    color: #1DB954;
+    background: #2a2a3a;
+}
+
+Bar > .bar--complete {
+    color: #1DB954;
+}
+
+PercentageStatus {
+    display: none;
+}
+
+ETAStatus {
+    display: none;
+}
