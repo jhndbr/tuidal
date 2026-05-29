@@ -51,7 +51,16 @@ class TrackList(Widget):
 
         table = self.query_one("#track-table", DataTable)
         table.clear()
+        
+        # Remove duplicate tracks (keep first occurrence)
+        seen = set()
+        unique_tracks = []
         for track in tracks:
+            if track.id not in seen:
+                seen.add(track.id)
+                unique_tracks.append(track)
+        
+        for track in unique_tracks:
             indicator = (
                 " ▶" if track.id == self._playing_id else str(track.track_number)
             )
