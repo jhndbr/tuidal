@@ -8,18 +8,18 @@
 /* -- Global -------------------------------------------------------- */
 
 Screen {
-    background: #0b0b14;
-    color: #d4d4d8;
+    background: transparent;
+    color: $text;
 }
 
 Header {
-    background: #12121e;
+    background: $surface;
     color: #1DB954;
 }
 
 Footer {
-    background: #12121e;
-    color: #808090;
+    background: $surface;
+    color: $text-muted;
 }
 
 /* -- Main Layout --------------------------------------------------- */
@@ -32,8 +32,8 @@ Footer {
 
 #sidebar {
     width: 34;
-    background: #0f0f1a;
-    border-right: thick #1e1e30;
+    background: transparent;
+    border-right: thick $surface;
 }
 
 #sidebar-title {
@@ -53,11 +53,11 @@ Footer {
 #sidebar ListItem {
     padding: 0 1;
     height: 2;
-    color: #b0b0c0;
+    color: $text-muted;
 }
 
 #sidebar ListItem:hover {
-    background: #1a1a2a;
+    background: $surface-active;
 }
 
 #sidebar ListView:focus > ListItem.--highlight {
@@ -70,7 +70,7 @@ Footer {
 
 #content {
     width: 1fr;
-    background: #0b0b14;
+    background: transparent;
 }
 
 #track-header {
@@ -88,40 +88,40 @@ Footer {
 }
 
 DataTable > .datatable--header {
-    background: #15151f;
-    color: #808090;
+    background: $surface;
+    color: $text-muted;
     text-style: bold;
 }
 
 DataTable > .datatable--cursor {
     background: #1DB95430;
-    color: #ffffff;
+    color: $text;
 }
 
 DataTable > .datatable--hover {
-    background: #1a1a2830;
+    background: $surface-active;
 }
 
 DataTable > .datatable--even-row {
-    background: #0e0e18;
+    background: transparent;
 }
 
 DataTable > .datatable--odd-row {
-    background: #0b0b14;
+    background: transparent;
 }
 
 /* -- Now Playing Bar ----------------------------------------------- */
 
 #now-playing-bar {
     height: 4;
-    background: #12121e;
-    border-top: thick #1e1e30;
+    background: $surface;
+    border-top: thick $surface;
     padding: 0 1;
     layout: vertical;
 }
 
 #np-track-info {
-    color: #ffffff;
+    color: $text;
     text-style: bold;
     height: 1;
 }
@@ -136,14 +136,14 @@ DataTable > .datatable--odd-row {
 #np-time-total {
     width: auto;
     min-width: 7;
-    color: #808090;
+    color: $text-muted;
     content-align-vertical: middle;
 }
 
 #np-volume {
     width: auto;
     min-width: 10;
-    color: #808090;
+    color: $text-muted;
     content-align-vertical: middle;
     text-align: right;
 }

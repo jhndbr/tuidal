@@ -65,6 +65,16 @@ class PlayerBackend:
 
         @self._player.event_callback("end-file")
         def _on_end_file(event) -> None:
+            # Check if it ended naturally (EOF)
+            try:
+                ev_dict = event.as_dict()
+                reason = ev_dict.get("reason")
+                # 0 is MpvEventEndFile.EOF, b'eof' is the string representation
+                if reason not in (0, b'eof'):
+                    return
+            except Exception:
+                pass
+
             # Skip if the user explicitly stopped playback
             if self._user_stopped:
                 self._user_stopped = False
