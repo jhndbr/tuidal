@@ -33,7 +33,7 @@ Footer {
 /* -- Sidebar (Playlist Browser) ------------------------------------ */
 
 #sidebar {
-    width: 30;
+    width: 22;
     background: transparent;
     border-right: solid $panel;
     padding: 0;
@@ -43,7 +43,7 @@ Footer {
     color: $text;
     text-style: bold;
     height: 1;
-    padding: 1 2 0 2;
+    padding: 1 1 0 1;
     background: transparent;
 }
 
@@ -56,7 +56,7 @@ Footer {
 }
 
 #sidebar ListItem {
-    padding: 0 2;
+    padding: 0 1;
     height: 1;
     color: $text-muted;
 }
