@@ -22,7 +22,7 @@ class NowPlaying(Widget):
     is_paused: reactive[bool] = reactive(True)
 
     def compose(self) -> ComposeResult:
-        yield Static("  ♫ No track playing", id="np-track-info")
+        yield Static("  No track playing", id="np-track-info")
         with Horizontal(id="np-progress-row"):
             yield Static(" 0:00 ", id="np-time-current")
             yield ProgressBar(
@@ -32,7 +32,7 @@ class NowPlaying(Widget):
                 id="np-progress",
             )
             yield Static(" 0:00 ", id="np-time-total")
-            yield Static(" 🔊 75% ", id="np-volume")
+            yield Static(" 100% ", id="np-volume")
 
     # -- Reactive watchers ----------------------------------------------------
 
@@ -40,7 +40,7 @@ class NowPlaying(Widget):
         icon = "⏸" if self.is_paused else "▶"
         try:
             self.query_one("#np-track-info", Static).update(
-                f"  {icon}  {value}"
+                f"  {icon} {value}"
             )
         except Exception:
             pass
@@ -49,7 +49,7 @@ class NowPlaying(Widget):
         icon = "⏸" if value else "▶"
         try:
             self.query_one("#np-track-info", Static).update(
-                f"  {icon}  {self.track_title}"
+                f"  {icon} {self.track_title}"
             )
         except Exception:
             pass
@@ -80,7 +80,7 @@ class NowPlaying(Widget):
 
     def watch_volume_level(self, value: int) -> None:
         try:
-            self.query_one("#np-volume", Static).update(f" 🔊 {value}% ")
+            self.query_one("#np-volume", Static).update(f" {value}% ")
         except Exception:
             pass
 

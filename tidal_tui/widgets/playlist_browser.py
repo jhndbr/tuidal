@@ -40,9 +40,9 @@ class PlaylistBrowser(Widget):
         for pl in playlists:
             item_id = f"pl-{pl.id}"
             self._playlists[item_id] = pl
-            count = f" ({pl.num_tracks})" if pl.num_tracks else ""
+            count = f"  ({pl.num_tracks})" if pl.num_tracks else ""
             lv.append(
-                ListItem(Label(f"  ♫ {pl.name}{count}"), id=item_id)
+                ListItem(Label(f"▪ {pl.name}{count}"), id=item_id)
             )
 
     # -- Events ---------------------------------------------------------------

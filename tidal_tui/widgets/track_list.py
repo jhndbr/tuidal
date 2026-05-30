@@ -46,7 +46,7 @@ class TrackList(Widget):
         """Replace the table contents with tracks from a new playlist."""
         self._tracks = list(tracks)
         self.query_one("#track-header", Static).update(
-            f"  ♫ {playlist_name}  ({len(tracks)} tracks)"
+            f"  ▪ {playlist_name}  ({len(tracks)} tracks)"
         )
 
         table = self.query_one("#track-table", DataTable)

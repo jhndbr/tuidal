@@ -1,8 +1,8 @@
 /* ================================================================
    Tidal TUI — Terminal Stylesheet
    ================================================================
-   Dark theme inspired by Spotify, optimized for terminal rendering.
-   Colors: deep navy background, green (#1DB954) accents.
+   Minimal, elegant theme using terminal-native colors.
+   Works with any terminal color scheme (light/dark).
    ================================================================ */
 
 /* -- Global -------------------------------------------------------- */
@@ -13,13 +13,15 @@ Screen {
 }
 
 Header {
-    background: $surface;
-    color: #1DB954;
+    background: transparent;
+    color: $text;
+    border-bottom: solid $panel;
 }
 
 Footer {
-    background: $surface;
+    background: transparent;
     color: $text-muted;
+    border-top: solid $panel;
 }
 
 /* -- Main Layout --------------------------------------------------- */
@@ -31,38 +33,42 @@ Footer {
 /* -- Sidebar (Playlist Browser) ------------------------------------ */
 
 #sidebar {
-    width: 34;
+    width: 30;
     background: transparent;
-    border-right: thick $surface;
+    border-right: solid $panel;
+    padding: 0;
 }
 
 #sidebar-title {
-    color: #707085;
+    color: $text;
     text-style: bold;
-    height: 2;
-    padding: 1 0 0 0;
+    height: 1;
+    padding: 1 2 0 2;
+    background: transparent;
 }
 
 #sidebar ListView {
     background: transparent;
-    scrollbar-color: #2a2a40;
-    scrollbar-color-hover: #3a3a55;
-    scrollbar-color-active: #1DB954;
+    scrollbar-color: $text-muted;
+    scrollbar-color-hover: $text;
+    scrollbar-color-active: $text;
+    scrollbar-size: 1 1;
 }
 
 #sidebar ListItem {
-    padding: 0 1;
-    height: 2;
+    padding: 0 2;
+    height: 1;
     color: $text-muted;
 }
 
 #sidebar ListItem:hover {
-    background: $surface-active;
+    background: $boost;
+    color: $text;
 }
 
 #sidebar ListView:focus > ListItem.--highlight {
-    background: #1DB95425;
-    color: #1DB954;
+    background: $boost;
+    color: $text;
     text-style: bold;
 }
 
@@ -74,32 +80,35 @@ Footer {
 }
 
 #track-header {
-    color: #e0e0e8;
+    color: $text;
     text-style: bold;
-    height: 2;
-    padding: 1 0 0 0;
+    height: 1;
+    padding: 1 2 0 2;
+    background: transparent;
 }
 
 #track-table {
     background: transparent;
-    scrollbar-color: #2a2a40;
-    scrollbar-color-hover: #3a3a55;
-    scrollbar-color-active: #1DB954;
+    scrollbar-color: $text-muted;
+    scrollbar-color-hover: $text;
+    scrollbar-color-active: $text;
+    scrollbar-size: 1 1;
 }
 
 DataTable > .datatable--header {
-    background: $surface;
+    background: transparent;
     color: $text-muted;
     text-style: bold;
+    border-bottom: solid $panel;
 }
 
 DataTable > .datatable--cursor {
-    background: #1DB95430;
+    background: $boost;
     color: $text;
 }
 
 DataTable > .datatable--hover {
-    background: $surface-active;
+    background: $boost;
 }
 
 DataTable > .datatable--even-row {
@@ -113,10 +122,10 @@ DataTable > .datatable--odd-row {
 /* -- Now Playing Bar ----------------------------------------------- */
 
 #now-playing-bar {
-    height: 4;
-    background: $surface;
-    border-top: thick $surface;
-    padding: 0 1;
+    height: 3;
+    background: transparent;
+    border-top: solid $panel;
+    padding: 0 2;
     layout: vertical;
 }
 
@@ -127,15 +136,15 @@ DataTable > .datatable--odd-row {
 }
 
 #np-progress-row {
-    height: 2;
+    height: 1;
     align-vertical: middle;
-    padding: 0 0;
+    padding: 0;
 }
 
 #np-time-current,
 #np-time-total {
     width: auto;
-    min-width: 7;
+    min-width: 6;
     color: $text-muted;
     content-align-vertical: middle;
 }
@@ -153,6 +162,7 @@ DataTable > .datatable--odd-row {
 ProgressBar {
     width: 1fr;
     padding: 0;
+    margin: 0;
 }
 
 ProgressBar Bar {
@@ -160,12 +170,12 @@ ProgressBar Bar {
 }
 
 Bar > .bar--bar {
-    color: #1DB954;
-    background: #2a2a3a;
+    color: $text;
+    background: $panel;
 }
 
 Bar > .bar--complete {
-    color: #1DB954;
+    color: $text;
 }
 
 PercentageStatus {

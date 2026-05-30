@@ -41,7 +41,7 @@ class TidalTUI(App):
 
     CSS_PATH = "styles/player.tcss"
     TITLE = "Tidal TUI"
-    SUB_TITLE = "♫ Music Player"
+    SUB_TITLE = "Terminal Music Player"
 
     BINDINGS = [
         Binding("space", "toggle_play", "Play/Pause", priority=True),
