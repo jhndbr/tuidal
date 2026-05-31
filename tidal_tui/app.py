@@ -1,278 +1,353 @@
-"""Main Textual application — orchestrates all TUI components.
+"""Main CLI application — Rich Live loop with keyboard input.
 
-This is the central hub that:
-  - Wires up services (TidalService, PlayerBackend) with widgets
-  - Routes events between components
-  - Manages background workers for network/audio operations
-  - Handles keybindings for playback control
+Replaces the Textual App with a Rich-based fullscreen interface
+that uses the terminal's native ANSI color palette.
 """
+
 from __future__ import annotations
 
-from textual import work
-from textual.app import App, ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal
-from textual.widgets import Footer, Header
+import os
+import threading
+import time
+from dataclasses import dataclass, field
 
+from rich.live import Live
+
+from tidal_tui.input import InputListener
 from tidal_tui.models import QueueState, RepeatMode
 from tidal_tui.services.player_backend import PlayerBackend
 from tidal_tui.services.tidal_service import TidalService
-from tidal_tui.widgets.now_playing import NowPlaying
-from tidal_tui.widgets.playlist_browser import PlaylistBrowser
-from tidal_tui.widgets.track_list import TrackList
+from tidal_tui.theme import console
+from tidal_tui.ui.layout import build_layout
 
 
-class TidalTUI(App):
-    """Terminal UI music player for Tidal.
+@dataclass
+class AppState:
+    """Shared application state — updated by main loop, mpv callbacks, and loaders.
 
-    Layout::
-
-        ┌──────────────────────────────────────────────┐
-        │ Header                                       │
-        ├────────────┬─────────────────────────────────┤
-        │ Playlists  │ Track List (DataTable)           │
-        │ (sidebar)  │                                  │
-        ├────────────┴─────────────────────────────────┤
-        │ Now Playing (progress + controls)             │
-        ├──────────────────────────────────────────────┤
-        │ Footer (keybindings)                          │
-        └──────────────────────────────────────────────┘
+    All mutations should be done under the lock when accessed from
+    multiple threads (mpv callbacks, network loaders, main loop).
     """
 
-    CSS_PATH = "styles/player.tcss"
-    TITLE = "Tidal TUI"
-    SUB_TITLE = "Terminal Music Player"
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    BINDINGS = [
-        Binding("space", "toggle_play", "Play/Pause", priority=True),
-        Binding("n", "next_track", "Next"),
-        Binding("p", "prev_track", "Prev"),
-        Binding("equal", "volume_up", "Vol+", show=False),
-        Binding("plus", "volume_up", "Vol+", show=False),
-        Binding("minus", "volume_down", "Vol-", show=False),
-        Binding("bracketright", "seek_forward", "→ 10s", show=False),
-        Binding("bracketleft", "seek_backward", "← 10s", show=False),
-        Binding("s", "toggle_shuffle", "Shuffle"),
-        Binding("r", "toggle_repeat", "Repeat"),
-        Binding("q", "quit_app", "Quit"),
-    ]
+    # -- Playlists
+    playlists: list = field(default_factory=list)
+    playlist_name: str = ""
+    playlist_cursor: int = 0
+
+    # -- Tracks
+    tracks: list = field(default_factory=list)
+    track_cursor: int = 0
+    playing_id: str | None = None
+
+    # -- Playback
+    track_title: str = "No track playing"
+    position: float = 0.0
+    duration: float = 0.0
+    volume: int = 75
+    is_paused: bool = True
+
+    # -- Queue state
+    shuffle: bool = False
+    repeat: RepeatMode = RepeatMode.OFF
+
+    # -- UI focus
+    active_panel: str = "sidebar"  # "sidebar" or "content"
+
+    # -- App control
+    running: bool = True
+    status_message: str = ""
+
+    @property
+    def repeat_label(self) -> str:
+        """Human-readable repeat mode."""
+        return {
+            RepeatMode.OFF: "off",
+            RepeatMode.ALL: "all",
+            RepeatMode.ONE: "one",
+        }[self.repeat]
+
+
+class TidalCLI:
+    """Rich-based CLI music player for Tidal.
+
+    Runs a Rich Live display with keyboard input from a separate thread.
+    All rendering uses ANSI colors that inherit the terminal's palette.
+    """
 
     def __init__(self, tidal_service: TidalService, quality: str = "high") -> None:
-        super().__init__()
         self.tidal = tidal_service
         self.player = PlayerBackend()
         self.queue = QueueState()
+        self.state = AppState()
+        self.input = InputListener()
         self._quality = quality
 
-    # -- Layout ---------------------------------------------------------------
+    # -- Main entry point -----------------------------------------------------
 
-    def compose(self) -> ComposeResult:
-        yield Header()
-        with Horizontal(id="main-container"):
-            yield PlaylistBrowser(id="sidebar")
-            yield TrackList(id="content")
-        yield NowPlaying(id="now-playing-bar")
-        yield Footer()
+    def run(self) -> None:
+        """Start the application."""
+        self._setup_player_callbacks()
+        self._load_playlists_async()
+        self.input.start()
 
-    # -- Lifecycle ------------------------------------------------------------
-
-    def on_mount(self) -> None:
-        """Wire up player callbacks and kick off playlist loading."""
-        # mpv callbacks fire in mpv's thread → use call_from_thread
-        self.player.on_time_change(
-            lambda pos: self.call_from_thread(self._update_position, pos)
-        )
-        self.player.on_duration_change(
-            lambda dur: self.call_from_thread(self._update_duration, dur)
-        )
-        self.player.on_track_end(
-            lambda: self.call_from_thread(self._on_track_ended)
-        )
-
-        # Initial volume
-        np = self.query_one("#now-playing-bar", NowPlaying)
-        np.volume_level = int(self.player.volume)
-
-        # Start loading playlists
-        self._load_playlists()
-
-    # -- UI update helpers (run on Textual thread) ----------------------------
-
-    def _update_position(self, position: float) -> None:
         try:
-            np = self.query_one("#now-playing-bar", NowPlaying)
-            np.position = position
-        except Exception:
+            term_size = os.get_terminal_size()
+            term_height = term_size.lines
+        except OSError:
+            term_height = 24
+
+        try:
+            with Live(
+                build_layout(self.state, term_height),
+                console=console,
+                refresh_per_second=10,
+                screen=True,
+                vertical_overflow="crop",
+            ) as live:
+                while self.state.running:
+                    # Process keyboard input
+                    for action in self.input.drain():
+                        self._handle_action(action)
+
+                    # Update terminal size
+                    try:
+                        term_size = os.get_terminal_size()
+                        term_height = term_size.lines
+                    except OSError:
+                        pass
+
+                    # Render
+                    live.update(build_layout(self.state, term_height))
+                    time.sleep(0.05)
+        except KeyboardInterrupt:
             pass
+        finally:
+            self._shutdown()
 
-    def _update_duration(self, duration: float) -> None:
-        try:
-            np = self.query_one("#now-playing-bar", NowPlaying)
-            np.duration = duration
-        except Exception:
-            pass
+    # -- Player callbacks (run in mpv thread) ---------------------------------
 
-    def _on_track_ended(self) -> None:
-        """Auto-advance to the next track."""
-        self.action_next_track()
+    def _setup_player_callbacks(self) -> None:
+        """Wire up mpv callbacks to update shared state."""
+        self.player.on_time_change(self._on_time_change)
+        self.player.on_duration_change(self._on_duration_change)
+        self.player.on_track_end(self._on_track_end)
+        self.state.volume = int(self.player.volume)
 
-    # -- Background workers ---------------------------------------------------
+    def _on_time_change(self, position: float) -> None:
+        with self.state.lock:
+            self.state.position = position
 
-    @work(thread=True, exclusive=True)
-    def _load_playlists(self) -> None:
-        """Fetch playlists from Tidal (runs in background thread)."""
-        try:
-            playlists = self.tidal.get_playlists()
-            self.call_from_thread(self._display_playlists, playlists)
-        except Exception as exc:
-            self.call_from_thread(
-                self.notify,
-                f"Error loading playlists: {exc}",
-                severity="error",
-            )
+    def _on_duration_change(self, duration: float) -> None:
+        with self.state.lock:
+            self.state.duration = duration
 
-    def _display_playlists(self, playlists) -> None:
-        browser = self.query_one("#sidebar", PlaylistBrowser)
-        browser.load_playlists(playlists)
-        if playlists:
-            self.notify(f"Loaded {len(playlists)} playlists", timeout=3)
+    def _on_track_end(self) -> None:
+        self._action_next_track()
 
-    @work(thread=True, exclusive=True)
-    def _load_tracks(self, playlist_id: str, playlist_name: str) -> None:
-        """Fetch tracks for a playlist (runs in background thread)."""
-        self.call_from_thread(
-            self.notify, f"Loading {playlist_name}...", timeout=2
-        )
-        try:
-            tracks = self.tidal.get_playlist_tracks(playlist_id)
-            self.call_from_thread(
-                self._display_tracks, tracks, playlist_name
-            )
-        except Exception as exc:
-            self.call_from_thread(
-                self.notify,
-                f"Error loading tracks: {exc}",
-                severity="error",
-            )
+    # -- Network loaders (background threads) ---------------------------------
 
-    def _display_tracks(self, tracks, playlist_name: str) -> None:
-        track_list = self.query_one("#content", TrackList)
-        track_list.load_tracks(tracks, playlist_name)
-        self.queue.set_tracks(tracks)
+    def _load_playlists_async(self) -> None:
+        """Load playlists from Tidal in a background thread."""
 
-    @work(thread=True, exclusive=True)
-    def _play_track_at(self, index: int) -> None:
-        """Resolve stream URL and start playback (background thread)."""
-        track = self.queue.select(index)
-        if not track:
-            return
+        def loader():
+            try:
+                playlists = self.tidal.get_playlists()
+                with self.state.lock:
+                    self.state.playlists = playlists
+                    self.state.status_message = f"Loaded {len(playlists)} playlists"
+            except Exception as exc:
+                with self.state.lock:
+                    self.state.status_message = f"Error: {exc}"
 
-        # Show loading state
-        self.call_from_thread(self._set_loading_state, track)
+        threading.Thread(target=loader, daemon=True, name="playlist-loader").start()
 
-        try:
-            url = self.tidal.resolve_stream_url(track.id)
-            if url:
-                self.player.play(url)
-                self.call_from_thread(self._set_playing_state, track)
-            else:
-                self.call_from_thread(
-                    self.notify,
-                    f"Could not resolve stream: {track.title}",
-                    severity="error",
-                )
-        except Exception as exc:
-            self.call_from_thread(
-                self.notify,
-                f"Playback error: {exc}",
-                severity="error",
-            )
+    def _load_tracks_async(self, playlist_id: str, playlist_name: str) -> None:
+        """Load tracks for a playlist in a background thread."""
+        with self.state.lock:
+            self.state.status_message = f"Loading {playlist_name}..."
 
-    def _set_loading_state(self, track) -> None:
-        np = self.query_one("#now-playing-bar", NowPlaying)
-        np.track_title = f"Loading… {track.display_label}"
-        np.is_paused = False
-        tl = self.query_one("#content", TrackList)
-        tl.set_playing(track.id)
+        def loader():
+            try:
+                tracks = self.tidal.get_playlist_tracks(playlist_id)
+                with self.state.lock:
+                    self.state.tracks = tracks
+                    self.state.track_cursor = 0
+                    self.state.playlist_name = playlist_name
+                    self.state.status_message = ""
+                self.queue.set_tracks(tracks)
+            except Exception as exc:
+                with self.state.lock:
+                    self.state.status_message = f"Error: {exc}"
 
-    def _set_playing_state(self, track) -> None:
-        np = self.query_one("#now-playing-bar", NowPlaying)
-        np.track_title = track.display_label
-        np.position = 0.0
-        np.duration = track.duration_seconds
-        np.is_paused = False
+        threading.Thread(target=loader, daemon=True, name="track-loader").start()
 
-    # -- Event handlers (messages from widgets) -------------------------------
+    # -- Action dispatcher ----------------------------------------------------
 
-    def on_playlist_browser_playlist_selected(
-        self, event: PlaylistBrowser.PlaylistSelected
-    ) -> None:
-        """User picked a playlist → load its tracks."""
-        self._load_tracks(event.playlist_id, event.playlist_name)
+    def _handle_action(self, action: str) -> None:
+        """Dispatch a keyboard action to the appropriate handler."""
+        handlers = {
+            "toggle_play": self._action_toggle_play,
+            "next_track": self._action_next_track,
+            "prev_track": self._action_prev_track,
+            "volume_up": self._action_volume_up,
+            "volume_down": self._action_volume_down,
+            "seek_forward": self._action_seek_forward,
+            "seek_backward": self._action_seek_backward,
+            "toggle_shuffle": self._action_toggle_shuffle,
+            "toggle_repeat": self._action_toggle_repeat,
+            "quit": self._action_quit,
+            "select": self._action_select,
+            "cursor_up": self._action_cursor_up,
+            "cursor_down": self._action_cursor_down,
+            "focus_sidebar": self._action_focus_sidebar,
+            "focus_content": self._action_focus_content,
+        }
+        handler = handlers.get(action)
+        if handler:
+            handler()
 
-    def on_track_list_track_selected(
-        self, event: TrackList.TrackSelected
-    ) -> None:
-        """User picked a track → resolve URL and play."""
-        for i, t in enumerate(self.queue.tracks):
-            if t.id == event.track_id:
-                self._play_track_at(i)
-                break
+    # -- Playback actions -----------------------------------------------------
 
-    # -- Actions (bound to keys) ----------------------------------------------
-
-    def action_toggle_play(self) -> None:
+    def _action_toggle_play(self) -> None:
         if self.queue.current_track is None:
             return
         self.player.toggle_pause()
-        np = self.query_one("#now-playing-bar", NowPlaying)
-        np.is_paused = self.player.paused
+        with self.state.lock:
+            self.state.is_paused = self.player.paused
 
-    def action_next_track(self) -> None:
+    def _action_next_track(self) -> None:
         nxt = self.queue.next_index
         if nxt is not None:
             self._play_track_at(nxt)
         else:
             self.player.stop()
-            np = self.query_one("#now-playing-bar", NowPlaying)
-            np.track_title = "Queue finished"
-            np.is_paused = True
+            with self.state.lock:
+                self.state.track_title = "Queue finished"
+                self.state.is_paused = True
 
-    def action_prev_track(self) -> None:
+    def _action_prev_track(self) -> None:
         prev = self.queue.prev_index
         if prev is not None:
             self._play_track_at(prev)
 
-    def action_volume_up(self) -> None:
+    def _action_volume_up(self) -> None:
         self.player.volume = min(150, self.player.volume + 5)
-        np = self.query_one("#now-playing-bar", NowPlaying)
-        np.volume_level = int(self.player.volume)
+        with self.state.lock:
+            self.state.volume = int(self.player.volume)
 
-    def action_volume_down(self) -> None:
+    def _action_volume_down(self) -> None:
         self.player.volume = max(0, self.player.volume - 5)
-        np = self.query_one("#now-playing-bar", NowPlaying)
-        np.volume_level = int(self.player.volume)
+        with self.state.lock:
+            self.state.volume = int(self.player.volume)
 
-    def action_seek_forward(self) -> None:
+    def _action_seek_forward(self) -> None:
         self.player.seek(10, relative=True)
 
-    def action_seek_backward(self) -> None:
+    def _action_seek_backward(self) -> None:
         self.player.seek(-10, relative=True)
 
-    def action_toggle_shuffle(self) -> None:
+    def _action_toggle_shuffle(self) -> None:
         enabled = self.queue.toggle_shuffle()
-        self.notify(f"Shuffle: {'on' if enabled else 'off'}", timeout=2)
+        with self.state.lock:
+            self.state.shuffle = enabled
 
-    def action_toggle_repeat(self) -> None:
+    def _action_toggle_repeat(self) -> None:
         mode = self.queue.toggle_repeat()
-        labels = {
-            RepeatMode.OFF: "off",
-            RepeatMode.ALL: "all",
-            RepeatMode.ONE: "one",
-        }
-        self.notify(f"Repeat: {labels[mode]}", timeout=2)
+        with self.state.lock:
+            self.state.repeat = mode
 
-    def action_quit_app(self) -> None:
-        """Clean shutdown: stop mpv, then exit."""
+    # -- Navigation actions ---------------------------------------------------
+
+    def _action_cursor_up(self) -> None:
+        with self.state.lock:
+            if self.state.active_panel == "sidebar":
+                self.state.playlist_cursor = max(0, self.state.playlist_cursor - 1)
+            else:
+                self.state.track_cursor = max(0, self.state.track_cursor - 1)
+
+    def _action_cursor_down(self) -> None:
+        with self.state.lock:
+            if self.state.active_panel == "sidebar":
+                max_idx = max(0, len(self.state.playlists) - 1)
+                self.state.playlist_cursor = min(
+                    max_idx, self.state.playlist_cursor + 1
+                )
+            else:
+                max_idx = max(0, len(self.state.tracks) - 1)
+                self.state.track_cursor = min(max_idx, self.state.track_cursor + 1)
+
+    def _action_focus_sidebar(self) -> None:
+        with self.state.lock:
+            self.state.active_panel = "sidebar"
+
+    def _action_focus_content(self) -> None:
+        with self.state.lock:
+            self.state.active_panel = "content"
+
+    def _action_select(self) -> None:
+        playlist_to_load: tuple[str, str] | None = None
+        track_index: int | None = None
+        with self.state.lock:
+            if self.state.active_panel == "sidebar":
+                if self.state.playlists and self.state.playlist_cursor < len(
+                    self.state.playlists
+                ):
+                    pl = self.state.playlists[self.state.playlist_cursor]
+                    playlist_to_load = (pl.id, pl.name)
+                    self.state.active_panel = "content"
+            else:
+                if self.state.tracks and self.state.track_cursor < len(
+                    self.state.tracks
+                ):
+                    track_index = self.state.track_cursor
+
+        if playlist_to_load:
+            self._load_tracks_async(*playlist_to_load)
+        elif track_index is not None:
+            self._play_track_at(track_index)
+
+    def _action_quit(self) -> None:
+        self.state.running = False
+
+    # -- Track playback -------------------------------------------------------
+
+    def _play_track_at(self, index: int) -> None:
+        """Resolve stream URL and start playback."""
+        track = self.queue.select(index)
+        if not track:
+            return
+
+        with self.state.lock:
+            self.state.track_title = f"Loading… {track.display_label}"
+            self.state.playing_id = track.id
+            self.state.is_paused = False
+            self.state.position = 0.0
+            self.state.duration = track.duration_seconds
+
+        def resolver():
+            try:
+                url = self.tidal.resolve_stream_url(track.id)
+                if url:
+                    self.player.play(url)
+                    with self.state.lock:
+                        self.state.track_title = track.display_label
+                        self.state.is_paused = False
+                else:
+                    with self.state.lock:
+                        self.state.track_title = f"Error: {track.title}"
+                        self.state.is_paused = True
+            except Exception:
+                with self.state.lock:
+                    self.state.track_title = f"Error: {track.title}"
+                    self.state.is_paused = True
+
+        threading.Thread(target=resolver, daemon=True, name="stream-resolver").start()
+
+    # -- Lifecycle ------------------------------------------------------------
+
+    def _shutdown(self) -> None:
+        """Clean up resources."""
+        self.input.stop()
         self.player.shutdown()
-        self.exit()

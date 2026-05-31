@@ -25,7 +25,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "textual>=0.38.0",
+    "rich>=13.0",
+    "readchar>=4.0",
     "tidalapi>=0.6.11",
     "python-mpv>=1.0.3",
 ]

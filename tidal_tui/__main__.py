@@ -1,4 +1,4 @@
-"""Entry point for the Tidal TUI player.
+"""Entry point for the Tidal CLI player.
 
 Run with:
     uv run tidal-tui
@@ -13,7 +13,7 @@ import sys
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="tidal-tui",
-        description="🎵 Tidal TUI Player — Browse and play Tidal playlists in your terminal",
+        description="🎵 Tidal CLI Player — Browse and play Tidal playlists in your terminal",
     )
     parser.add_argument(
         "--quality",
@@ -53,7 +53,7 @@ def main() -> None:
         clear_session()
         print("🗑️  Session cleared.")
 
-    # -- Authenticate before launching TUI ------------------------------------
+    # -- Authenticate before launching CLI ------------------------------------
 
     from tidal_tui.services.tidal_service import TidalService
 
@@ -68,11 +68,11 @@ def main() -> None:
     print("✅ Authenticated!")
     print("🎵 Launching player...")
 
-    # -- Launch TUI -----------------------------------------------------------
+    # -- Launch CLI -----------------------------------------------------------
 
-    from tidal_tui.app import TidalTUI
+    from tidal_tui.app import TidalCLI
 
-    app = TidalTUI(tidal_service=service, quality=args.quality)
+    app = TidalCLI(tidal_service=service, quality=args.quality)
     app.run()
 
 
