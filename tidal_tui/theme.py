@@ -20,11 +20,11 @@ PLAYER_THEME = Theme(
         "sidebar.selected": "bold cyan",
         "sidebar.hover": "white",
         # -- Track list
-        "track.header": "bold green",
-        "track.column": "bold bright_black italic",
+        "track.header": "bold blue",
+        "track.column": "bold cyan",
         "track.normal": "default",
-        "track.playing": "bold cyan",
-        "track.selected": "bold cyan",
+        "track.playing": "bold yellow",
+        "track.selected": "bold white on blue",
         "track.number": "bright_black",
         # -- Now playing
         "np.title": "bold white",

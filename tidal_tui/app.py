@@ -11,6 +11,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+import readchar
 from rich.live import Live
 
 from tidal_tui.input import InputListener
@@ -19,6 +20,33 @@ from tidal_tui.services.player_backend import PlayerBackend
 from tidal_tui.services.tidal_service import TidalService
 from tidal_tui.theme import console
 from tidal_tui.ui.layout import build_layout
+
+
+KEY_MAP: dict[str, str] = {
+    " ": "toggle_play",
+    "n": "next_track",
+    "p": "prev_track",
+    "=": "volume_up",
+    "+": "volume_up",
+    "-": "volume_down",
+    "]": "seek_forward",
+    "[": "seek_backward",
+    "s": "toggle_shuffle",
+    "r": "toggle_repeat",
+    "q": "quit",
+    "\r": "select",
+    "\n": "select",
+    readchar.key.UP: "cursor_up",
+    readchar.key.DOWN: "cursor_down",
+    readchar.key.LEFT: "focus_sidebar",
+    readchar.key.RIGHT: "focus_content",
+    "j": "cursor_down",
+    "k": "cursor_up",
+    "h": "focus_sidebar",
+    "l": "focus_content",
+    "/": "toggle_search",
+    "f": "toggle_favorite",
+}
 
 
 @dataclass
@@ -40,6 +68,7 @@ class AppState:
     tracks: list = field(default_factory=list)
     track_cursor: int = 0
     playing_id: str | None = None
+    favorite_track_ids: set[str] = field(default_factory=set)
 
     # -- Playback
     track_title: str = "No track playing"
@@ -54,6 +83,8 @@ class AppState:
 
     # -- UI focus
     active_panel: str = "sidebar"  # "sidebar" or "content"
+    input_mode: str = "normal"  # "normal" or "search"
+    search_query: str = ""
 
     # -- App control
     running: bool = True
@@ -108,8 +139,8 @@ class TidalCLI:
             ) as live:
                 while self.state.running:
                     # Process keyboard input
-                    for action in self.input.drain():
-                        self._handle_action(action)
+                    for key in self.input.drain():
+                        self._handle_key(key)
 
                     # Update terminal size
                     try:
@@ -153,10 +184,23 @@ class TidalCLI:
 
         def loader():
             try:
+                # Also fetch favorites in the background
+                fav_tracks = []
+                try:
+                    fav_tracks = self.tidal.get_favorite_tracks()
+                except Exception:
+                    pass
+                
                 playlists = self.tidal.get_playlists()
+                
+                from tidal_tui.models import PlaylistInfo
+                fav_playlist = PlaylistInfo(id="__favorites__", name="❤️ Favoritas", num_tracks=len(fav_tracks), description="Tus canciones favoritas")
+                playlists.insert(0, fav_playlist)
+                
                 with self.state.lock:
                     self.state.playlists = playlists
-                    self.state.status_message = f"Loaded {len(playlists)} playlists"
+                    self.state.favorite_track_ids = {t.id for t in fav_tracks}
+                    self.state.status_message = f"Loaded {len(playlists)-1} playlists"
             except Exception as exc:
                 with self.state.lock:
                     self.state.status_message = f"Error: {exc}"
@@ -170,7 +214,10 @@ class TidalCLI:
 
         def loader():
             try:
-                tracks = self.tidal.get_playlist_tracks(playlist_id)
+                if playlist_id == "__favorites__":
+                    tracks = self.tidal.get_favorite_tracks()
+                else:
+                    tracks = self.tidal.get_playlist_tracks(playlist_id)
                 with self.state.lock:
                     self.state.tracks = tracks
                     self.state.track_cursor = 0
@@ -183,7 +230,66 @@ class TidalCLI:
 
         threading.Thread(target=loader, daemon=True, name="track-loader").start()
 
+    def _search_async(self, query: str) -> None:
+        """Execute a search in a background thread."""
+        with self.state.lock:
+            self.state.status_message = f"Searching for '{query}'..."
+
+        def loader():
+            try:
+                tracks = self.tidal.search_tracks(query)
+                with self.state.lock:
+                    self.state.tracks = tracks
+                    self.state.track_cursor = 0
+                    self.state.playlist_name = f"Search: {query}"
+                    self.state.active_panel = "content"
+                    self.state.status_message = ""
+                self.queue.set_tracks(tracks)
+            except Exception as exc:
+                with self.state.lock:
+                    self.state.status_message = f"Error: {exc}"
+
+        threading.Thread(target=loader, daemon=True, name="search-loader").start()
+
     # -- Action dispatcher ----------------------------------------------------
+
+    def _handle_key(self, key: str) -> None:
+        """Handle a raw keyboard input."""
+        with self.state.lock:
+            mode = self.state.input_mode
+
+        if mode == "search":
+            self._handle_search_key(key)
+        else:
+            action = KEY_MAP.get(key)
+            if action:
+                self._handle_action(action)
+
+    def _handle_search_key(self, key: str) -> None:
+        """Process keys while in search mode."""
+        if key == readchar.key.ESC:
+            with self.state.lock:
+                self.state.input_mode = "normal"
+                self.state.search_query = ""
+            return
+        
+        if key in ("\r", "\n", readchar.key.ENTER):
+            with self.state.lock:
+                query = self.state.search_query
+                self.state.input_mode = "normal"
+            if query.strip():
+                self._search_async(query.strip())
+            return
+            
+        if key in (readchar.key.BACKSPACE, "\x7f", "\x08"):
+            with self.state.lock:
+                self.state.search_query = self.state.search_query[:-1]
+            return
+            
+        # Only accept printable characters (crude check, but works for most TUI)
+        if len(key) == 1 and key.isprintable():
+            with self.state.lock:
+                self.state.search_query += key
 
     def _handle_action(self, action: str) -> None:
         """Dispatch a keyboard action to the appropriate handler."""
@@ -203,6 +309,8 @@ class TidalCLI:
             "cursor_down": self._action_cursor_down,
             "focus_sidebar": self._action_focus_sidebar,
             "focus_content": self._action_focus_content,
+            "toggle_search": self._action_toggle_search,
+            "toggle_favorite": self._action_toggle_favorite,
         }
         handler = handlers.get(action)
         if handler:
@@ -285,6 +393,40 @@ class TidalCLI:
     def _action_focus_content(self) -> None:
         with self.state.lock:
             self.state.active_panel = "content"
+
+    def _action_toggle_search(self) -> None:
+        with self.state.lock:
+            self.state.input_mode = "search"
+            self.state.search_query = ""
+
+    def _action_toggle_favorite(self) -> None:
+        track = None
+        with self.state.lock:
+            if self.state.active_panel == "content" and self.state.tracks and self.state.track_cursor < len(self.state.tracks):
+                track = self.state.tracks[self.state.track_cursor]
+        
+        if not track:
+            return
+            
+        track_id = track.id
+        with self.state.lock:
+            is_fav = track_id in self.state.favorite_track_ids
+            new_fav = not is_fav
+            if new_fav:
+                self.state.favorite_track_ids.add(track_id)
+                self.state.status_message = f"Added {track.title} to favorites"
+            else:
+                self.state.favorite_track_ids.remove(track_id)
+                self.state.status_message = f"Removed {track.title} from favorites"
+                
+        def togger():
+            try:
+                self.tidal.toggle_favorite(track_id, new_fav)
+            except Exception as exc:
+                with self.state.lock:
+                    self.state.status_message = f"Error: {exc}"
+                    
+        threading.Thread(target=togger, daemon=True, name="favorite-toggler").start()
 
     def _action_select(self) -> None:
         playlist_to_load: tuple[str, str] | None = None

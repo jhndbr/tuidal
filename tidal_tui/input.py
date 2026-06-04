@@ -1,4 +1,4 @@
-"""Keyboard input handler — readchar in a dedicated thread.
+"""Keyboard input handler — readchar in a daemon thread.
 
 Captures single keypresses without blocking the main rendering loop.
 Keys are placed into a queue.Queue for the main thread to consume.
@@ -11,32 +11,6 @@ from queue import Empty, Queue
 import readchar
 
 
-# Map raw keys to action names (mirrors the old Textual bindings).
-KEY_MAP: dict[str, str] = {
-    " ": "toggle_play",
-    "n": "next_track",
-    "p": "prev_track",
-    "=": "volume_up",
-    "+": "volume_up",
-    "-": "volume_down",
-    "]": "seek_forward",
-    "[": "seek_backward",
-    "s": "toggle_shuffle",
-    "r": "toggle_repeat",
-    "q": "quit",
-    "\r": "select",
-    "\n": "select",
-    readchar.key.UP: "cursor_up",
-    readchar.key.DOWN: "cursor_down",
-    readchar.key.LEFT: "focus_sidebar",
-    readchar.key.RIGHT: "focus_content",
-    "j": "cursor_down",
-    "k": "cursor_up",
-    "h": "focus_sidebar",
-    "l": "focus_content",
-}
-
-
 class InputListener:
     """Non-blocking keyboard listener running in a daemon thread.
 
@@ -46,8 +20,8 @@ class InputListener:
         listener.start()
 
         # In your main loop:
-        for action in listener.drain():
-            handle(action)
+        for key in listener.drain():
+            handle_key(key)
 
         listener.stop()
     """
@@ -69,14 +43,14 @@ class InputListener:
         self._stop.set()
 
     def drain(self) -> list[str]:
-        """Return all pending actions (non-blocking)."""
-        actions: list[str] = []
+        """Return all pending keys (non-blocking)."""
+        keys: list[str] = []
         while True:
             try:
-                actions.append(self._queue.get_nowait())
+                keys.append(self._queue.get_nowait())
             except Empty:
                 break
-        return actions
+        return keys
 
     # -- Internal -------------------------------------------------------------
 
@@ -85,10 +59,9 @@ class InputListener:
         while not self._stop.is_set():
             try:
                 key = readchar.readkey()
-                action = KEY_MAP.get(key)
-                if action:
-                    self._queue.put(action)
-                    if action == "quit":
-                        break
+                self._queue.put(key)
+                if key == "q":  # we still need a hard break if needed, but let's just keep reading until stopped. Wait, 'q' might not quit if searching.
+                    pass
             except Exception:
                 break
+

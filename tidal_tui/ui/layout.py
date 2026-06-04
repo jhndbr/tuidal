@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from rich.layout import Layout
 from rich.panel import Panel
+from rich import box
 from rich.text import Text
 
 from tidal_tui.ui.now_playing import render_now_playing
@@ -15,11 +16,19 @@ if TYPE_CHECKING:
     from tidal_tui.app import AppState
 
 
-def _render_header() -> Text:
+def _render_header(state: AppState) -> Text:
     """Render the header line."""
     header = Text()
-    header.append(" ♫ ", style="header.icon")
+    header.append(" ", style="header")
     header.append("Tidal CLI", style="header")
+    
+    if state.input_mode == "search":
+        header.append("   [ Search: ", style="bold yellow")
+        header.append(state.search_query, style="bold white")
+        header.append("█ ]", style="blink bold yellow")
+    elif state.status_message:
+        header.append(f"   {state.status_message}", style="dim white")
+        
     return header
 
 
@@ -35,6 +44,8 @@ def _render_footer(shuffle: bool, repeat: str) -> Text:
         ("r", f"repeat {repeat}"),
         ("+/-", "vol"),
         ("[/]", "seek"),
+        ("/", "search"),
+        ("f", "fav"),
         ("q", "quit"),
     ]
     for i, (key, desc) in enumerate(keys):
@@ -62,7 +73,7 @@ def build_layout(state: AppState, term_height: int = 24) -> Layout:
     )
 
     # -- Header
-    layout["header"].update(_render_header())
+    layout["header"].update(_render_header(state))
 
     # -- Body: sidebar + content
     layout["body"].split_row(
@@ -79,9 +90,10 @@ def build_layout(state: AppState, term_height: int = 24) -> Layout:
     layout["sidebar"].update(
         Panel(
             playlist_content,
-            title="♫ Playlists",
+            title="Playlists",
             title_align="left",
             border_style="sidebar.title" if state.active_panel == "sidebar" else "border",
+            box=box.ROUNDED,
             padding=(1, 0),
         )
     )
@@ -94,12 +106,14 @@ def build_layout(state: AppState, term_height: int = 24) -> Layout:
         cursor=state.track_cursor,
         playing_id=state.playing_id,
         active=state.active_panel == "content",
+        favorite_track_ids=state.favorite_track_ids,
         max_rows=body_height - 4,
     )
     layout["content"].update(
         Panel(
             track_table,
             border_style="track.header" if state.active_panel == "content" else "border",
+            box=box.ROUNDED,
             padding=(0, 0),
         )
     )
@@ -118,6 +132,7 @@ def build_layout(state: AppState, term_height: int = 24) -> Layout:
         Panel(
             np_content,
             border_style="border",
+            box=box.ROUNDED,
             padding=(0, 0),
         )
     )

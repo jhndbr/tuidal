@@ -13,6 +13,7 @@ def render_track_table(
     cursor: int,
     playing_id: str | None,
     active: bool,
+    favorite_track_ids: set[str],
     max_rows: int | None = None,
 ) -> Table:
     """Render tracks as a Rich Table.
@@ -23,6 +24,7 @@ def render_track_table(
         cursor: Currently highlighted row index.
         playing_id: Track ID currently playing (gets ▶ indicator).
         active: Whether this panel has focus.
+        favorite_track_ids: Set of track IDs marked as favorite.
         max_rows: Maximum rows to display (for viewport scrolling).
     """
     table = Table(
@@ -33,7 +35,7 @@ def render_track_table(
         pad_edge=True,
         padding=(0, 1),
         header_style="track.column",
-        title=f"♫ {playlist_name}" if playlist_name else None,
+        title=f"{playlist_name}" if playlist_name else None,
         title_style="track.header",
         title_justify="left",
     )
@@ -81,9 +83,11 @@ def render_track_table(
         else:
             style = "track.normal"
 
+        title_text = f"♥ {track.title}" if track.id in favorite_track_ids else track.title
+
         table.add_row(
             num,
-            Text(track.title, style=style, overflow="ellipsis"),
+            Text(title_text, style=style, overflow="ellipsis"),
             Text(track.artist, style=style, overflow="ellipsis"),
             Text(track.album, style=style, overflow="ellipsis"),
             Text(track.duration_display),

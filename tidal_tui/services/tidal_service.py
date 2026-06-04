@@ -131,6 +131,45 @@ class TidalService:
             raise RuntimeError(f"Failed to fetch tracks: {exc}") from exc
         return result
 
+    def search_tracks(self, query: str, limit: int = 50) -> list[TrackInfo]:
+        """Search for tracks matching the query."""
+        if not query:
+            return []
+        
+        result: list[TrackInfo] = []
+        try:
+            search_result = self._session.search(query, models=[tidalapi.media.Track], limit=limit)
+            raw_tracks = search_result.get("tracks", []) if isinstance(search_result, dict) else getattr(search_result, "tracks", [])
+            for i, track in enumerate(raw_tracks, start=1):
+                result.append(self._track_to_info(track, i))
+        except Exception as exc:
+            raise RuntimeError(f"Search failed: {exc}") from exc
+        return result
+
+    def get_favorite_tracks(self) -> list[TrackInfo]:
+        """Fetch user's favorite tracks."""
+        result: list[TrackInfo] = []
+        try:
+            if hasattr(self._session.user, "favorites") and self._session.user.favorites:
+                raw_tracks = self._session.user.favorites.tracks()
+                for i, track in enumerate(raw_tracks, start=1):
+                    result.append(self._track_to_info(track, i))
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch favorites: {exc}") from exc
+        return result
+
+    def toggle_favorite(self, track_id: str, is_favorite: bool) -> None:
+        """Add or remove a track from favorites."""
+        try:
+            if not hasattr(self._session.user, "favorites") or not self._session.user.favorites:
+                return
+            if is_favorite:
+                self._session.user.favorites.add_track(track_id)
+            else:
+                self._session.user.favorites.remove_track(track_id)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to toggle favorite: {exc}") from exc
+
     def _get_playlist(self, playlist_id: str):
         """Get a playlist object by ID, trying multiple APIs."""
         # Modern API
