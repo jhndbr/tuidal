@@ -7,9 +7,11 @@ or swap to a different backend.
 from __future__ import annotations
 
 import tidalapi
+import tidalapi.album as tidal_album
+import tidalapi.artist as tidal_artist
 
 from tidal_tui.config import load_session_tokens, save_session_tokens
-from tidal_tui.models import PlaylistInfo, TrackInfo
+from tidal_tui.models import AlbumInfo, ArtistInfo, PlaylistInfo, SearchType, TrackInfo
 
 
 # Maps user-facing quality names to tidalapi enum values.
@@ -101,18 +103,30 @@ class TidalService:
     # -- Playlists ------------------------------------------------------------
 
     def get_playlists(self) -> list[PlaylistInfo]:
-        """Fetch all playlists for the authenticated user."""
+        """Fetch all playlists for the authenticated user.
+        
+        Bypasses `self._session.user.playlists()` because that implementation
+        does a synchronous GET request for *every single playlist* to fetch
+        details, which fails the entire batch if Tidal returns a 500 Server Error
+        for any individual playlist.
+        """
         result: list[PlaylistInfo] = []
         try:
-            for pl in self._session.user.playlists():
-                result.append(
-                    PlaylistInfo(
-                        id=str(getattr(pl, "id", "")),
-                        name=getattr(pl, "name", "Untitled"),
-                        num_tracks=getattr(pl, "num_tracks", 0) or 0,
-                        description=getattr(pl, "description", "") or "",
+            # Fetch the raw JSON containing all playlists in one request
+            user_id = self._session.user.id
+            resp = self._session.request.request("GET", f"users/{user_id}/playlists")
+            data = resp.json()
+            
+            if isinstance(data, dict) and "items" in data:
+                for item in data["items"]:
+                    result.append(
+                        PlaylistInfo(
+                            id=item.get("uuid", ""),
+                            name=item.get("title", "Untitled"),
+                            num_tracks=item.get("numberOfTracks", 0),
+                            description=item.get("description", ""),
+                        )
                     )
-                )
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch playlists: {exc}") from exc
         return result
@@ -144,6 +158,112 @@ class TidalService:
                 result.append(self._track_to_info(track, i))
         except Exception as exc:
             raise RuntimeError(f"Search failed: {exc}") from exc
+        return result
+
+    def search_artists(self, query: str, limit: int = 30) -> list[ArtistInfo]:
+        """Search for artists matching the query."""
+        if not query:
+            return []
+
+        result: list[ArtistInfo] = []
+        try:
+            search_result = self._session.search(
+                query, models=[tidal_artist.Artist], limit=limit
+            )
+            raw_artists = (
+                search_result.get("artists", [])
+                if isinstance(search_result, dict)
+                else getattr(search_result, "artists", [])
+            )
+            for artist in raw_artists:
+                result.append(
+                    ArtistInfo(
+                        id=str(getattr(artist, "id", "")),
+                        name=getattr(artist, "name", "Unknown"),
+                    )
+                )
+        except Exception as exc:
+            raise RuntimeError(f"Artist search failed: {exc}") from exc
+        return result
+
+    def search_albums(self, query: str, limit: int = 30) -> list[AlbumInfo]:
+        """Search for albums matching the query."""
+        if not query:
+            return []
+
+        result: list[AlbumInfo] = []
+        try:
+            search_result = self._session.search(
+                query, models=[tidal_album.Album], limit=limit
+            )
+            raw_albums = (
+                search_result.get("albums", [])
+                if isinstance(search_result, dict)
+                else getattr(search_result, "albums", [])
+            )
+            for album in raw_albums:
+                result.append(self._album_to_info(album))
+        except Exception as exc:
+            raise RuntimeError(f"Album search failed: {exc}") from exc
+        return result
+
+    def search_all(
+        self, query: str, limit: int = 20
+    ) -> dict[str, list]:
+        """Search across tracks, artists, and albums simultaneously.
+
+        Returns a dict with keys 'tracks', 'artists', 'albums'.
+        """
+        if not query:
+            return {"tracks": [], "artists": [], "albums": []}
+
+        try:
+            search_result = self._session.search(query, limit=limit)
+            raw = search_result if isinstance(search_result, dict) else {}
+
+            tracks: list[TrackInfo] = []
+            for i, track in enumerate(raw.get("tracks", []), start=1):
+                tracks.append(self._track_to_info(track, i))
+
+            artists: list[ArtistInfo] = []
+            for artist in raw.get("artists", []):
+                artists.append(
+                    ArtistInfo(
+                        id=str(getattr(artist, "id", "")),
+                        name=getattr(artist, "name", "Unknown"),
+                    )
+                )
+
+            albums: list[AlbumInfo] = []
+            for album in raw.get("albums", []):
+                albums.append(self._album_to_info(album))
+
+            return {"tracks": tracks, "artists": artists, "albums": albums}
+        except Exception as exc:
+            raise RuntimeError(f"Search failed: {exc}") from exc
+
+    def get_artist_top_tracks(self, artist_id: str, limit: int = 50) -> list[TrackInfo]:
+        """Fetch the top tracks for an artist."""
+        result: list[TrackInfo] = []
+        try:
+            artist = self._session.artist(artist_id)
+            raw_tracks = artist.get_top_tracks(limit=limit)
+            for i, track in enumerate(raw_tracks, start=1):
+                result.append(self._track_to_info(track, i))
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch artist tracks: {exc}") from exc
+        return result
+
+    def get_album_tracks(self, album_id: str) -> list[TrackInfo]:
+        """Fetch all tracks from an album."""
+        result: list[TrackInfo] = []
+        try:
+            album = self._session.album(album_id)
+            raw_tracks = album.tracks()
+            for i, track in enumerate(raw_tracks, start=1):
+                result.append(self._track_to_info(track, i))
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch album tracks: {exc}") from exc
         return result
 
     def get_favorite_tracks(self) -> list[TrackInfo]:
@@ -240,6 +360,36 @@ class TidalService:
             album=album_name,
             duration_seconds=float(duration),
             track_number=index,
+        )
+
+    @staticmethod
+    def _album_to_info(album) -> AlbumInfo:
+        """Convert a tidalapi Album object to our AlbumInfo model."""
+        artist_name = ""
+        if hasattr(album, "artist") and album.artist is not None:
+            artist_name = getattr(album.artist, "name", str(album.artist))
+        elif hasattr(album, "artists") and album.artists:
+            try:
+                artist_name = getattr(album.artists[0], "name", "")
+            except (IndexError, TypeError):
+                pass
+
+        duration = getattr(album, "duration", 0) or 0
+        num_tracks = getattr(album, "num_tracks", 0) or 0
+
+        year = None
+        if hasattr(album, "year") and album.year:
+            year = album.year
+        elif hasattr(album, "release_date") and album.release_date:
+            year = album.release_date.year
+
+        return AlbumInfo(
+            id=str(getattr(album, "id", "")),
+            name=getattr(album, "name", "") or "Unknown",
+            artist=artist_name,
+            num_tracks=num_tracks,
+            duration_seconds=float(duration),
+            year=year,
         )
 
     # -- Streaming ------------------------------------------------------------

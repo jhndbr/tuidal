@@ -23,9 +23,17 @@ def _render_header(state: AppState) -> Text:
     header.append("Tidal CLI", style="header")
     
     if state.input_mode == "search":
-        header.append("   [ Search: ", style="bold yellow")
+        # Show search type selector
+        type_labels = {"all": "All", "tracks": "Tracks", "artists": "Artists", "albums": "Albums"}
+        type_name = type_labels.get(state.search_type.value, state.search_type.value)
+        header.append("   [ ", style="bold yellow")
+        header.append(f"{type_name}", style="bold magenta")
+        header.append(" │ ", style="bold yellow")
         header.append(state.search_query, style="bold white")
-        header.append("█ ]", style="blink bold yellow")
+        header.append("█", style="blink bold yellow")
+        header.append(" ]", style="bold yellow")
+        header.append("  Tab", style="bold cyan")
+        header.append("=type", style="dim white")
     elif state.status_message:
         header.append(f"   {state.status_message}", style="dim white")
         
@@ -86,6 +94,7 @@ def build_layout(state: AppState, term_height: int = 24) -> Layout:
         playlists=state.playlists,
         cursor=state.playlist_cursor,
         active=state.active_panel == "sidebar",
+        error=state.sidebar_error,
     )
     layout["sidebar"].update(
         Panel(
@@ -108,6 +117,9 @@ def build_layout(state: AppState, term_height: int = 24) -> Layout:
         active=state.active_panel == "content",
         favorite_track_ids=state.favorite_track_ids,
         max_rows=body_height - 4,
+        search_results_mode=state.search_results_mode,
+        search_results_artists=state.search_results_artists,
+        search_results_albums=state.search_results_albums,
     )
     layout["content"].update(
         Panel(

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Union
 
 
 class PlayerState(Enum):
@@ -25,6 +26,15 @@ class RepeatMode(Enum):
     OFF = "off"
     ALL = "all"
     ONE = "one"
+
+
+class SearchType(Enum):
+    """Type of search to perform."""
+
+    ALL = "all"
+    TRACKS = "tracks"
+    ARTISTS = "artists"
+    ALBUMS = "albums"
 
 
 @dataclass(frozen=True)
@@ -67,6 +77,47 @@ class PlaylistInfo:
     num_tracks: int
     description: str = ""
     image_url: str | None = None
+
+
+@dataclass(frozen=True)
+class ArtistInfo:
+    """Immutable representation of a search result artist."""
+
+    id: str
+    name: str
+
+    @property
+    def display_label(self) -> str:
+        return self.name
+
+
+@dataclass(frozen=True)
+class AlbumInfo:
+    """Immutable representation of a search result album."""
+
+    id: str
+    name: str
+    artist: str
+    num_tracks: int = 0
+    duration_seconds: float = 0.0
+    year: int | None = None
+
+    @property
+    def duration_display(self) -> str:
+        """Format duration as M:SS for display."""
+        total = int(self.duration_seconds)
+        minutes, seconds = divmod(total, 60)
+        return f"{minutes}:{seconds:02d}"
+
+    @property
+    def display_label(self) -> str:
+        if self.artist:
+            return f"{self.artist} — {self.name}"
+        return self.name
+
+
+# Union type for search results that can appear in the content panel
+SearchResultItem = Union[TrackInfo, ArtistInfo, AlbumInfo]
 
 
 @dataclass

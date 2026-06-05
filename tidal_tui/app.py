@@ -15,7 +15,7 @@ import readchar
 from rich.live import Live
 
 from tidal_tui.input import InputListener
-from tidal_tui.models import QueueState, RepeatMode
+from tidal_tui.models import AlbumInfo, ArtistInfo, QueueState, RepeatMode, SearchType
 from tidal_tui.services.player_backend import PlayerBackend
 from tidal_tui.services.tidal_service import TidalService
 from tidal_tui.theme import console
@@ -46,6 +46,7 @@ KEY_MAP: dict[str, str] = {
     "l": "focus_content",
     "/": "toggle_search",
     "f": "toggle_favorite",
+    "R": "retry_playlists",
 }
 
 
@@ -63,6 +64,7 @@ class AppState:
     playlists: list = field(default_factory=list)
     playlist_name: str = ""
     playlist_cursor: int = 0
+    sidebar_error: str = ""  # error message shown in sidebar
 
     # -- Tracks
     tracks: list = field(default_factory=list)
@@ -85,6 +87,12 @@ class AppState:
     active_panel: str = "sidebar"  # "sidebar" or "content"
     input_mode: str = "normal"  # "normal" or "search"
     search_query: str = ""
+    search_type: SearchType = SearchType.ALL
+
+    # -- Search results (artists/albums shown as browseable lists)
+    search_results_artists: list = field(default_factory=list)
+    search_results_albums: list = field(default_factory=list)
+    search_results_mode: str = ""  # "tracks", "artists", "albums", or "" for normal
 
     # -- App control
     running: bool = True
@@ -184,26 +192,53 @@ class TidalCLI:
 
         def loader():
             try:
-                # Also fetch favorites in the background
-                fav_tracks = []
+                from tidal_tui.models import PlaylistInfo
+
+                loaded_playlists: list = []
+                fav_tracks: list = []
+
+                # Fetch favorites (non-fatal if it fails)
                 try:
                     fav_tracks = self.tidal.get_favorite_tracks()
                 except Exception:
                     pass
-                
-                playlists = self.tidal.get_playlists()
-                
-                from tidal_tui.models import PlaylistInfo
-                fav_playlist = PlaylistInfo(id="__favorites__", name="❤️ Favoritas", num_tracks=len(fav_tracks), description="Tus canciones favoritas")
-                playlists.insert(0, fav_playlist)
-                
+
+                # Fetch playlists (non-fatal if it fails)
+                playlists_error = ""
+                try:
+                    loaded_playlists = self.tidal.get_playlists()
+                except Exception as exc:
+                    playlists_error = str(exc)
+
+                # Build the final list — always add favorites if we have them
+                final: list = []
+                if fav_tracks:
+                    fav_playlist = PlaylistInfo(
+                        id="__favorites__",
+                        name="\u2764\ufe0f Favoritas",
+                        num_tracks=len(fav_tracks),
+                        description="Tus canciones favoritas",
+                    )
+                    final.append(fav_playlist)
+                final.extend(loaded_playlists)
+
                 with self.state.lock:
-                    self.state.playlists = playlists
+                    self.state.playlists = final
                     self.state.favorite_track_ids = {t.id for t in fav_tracks}
-                    self.state.status_message = f"Loaded {len(playlists)-1} playlists"
+                    if final:
+                        self.state.sidebar_error = ""
+                        self.state.status_message = f"Loaded {len(loaded_playlists)} playlists"
+                    elif playlists_error:
+                        self.state.sidebar_error = playlists_error
+                        self.state.status_message = "Error loading playlists (/ to search)"
+                    else:
+                        self.state.sidebar_error = ""
+                        self.state.status_message = "No playlists found"
+
             except Exception as exc:
                 with self.state.lock:
-                    self.state.status_message = f"Error: {exc}"
+                    self.state.sidebar_error = str(exc)
+                    self.state.status_message = "Error loading playlists (/ to search)"
 
         threading.Thread(target=loader, daemon=True, name="playlist-loader").start()
 
@@ -222,6 +257,9 @@ class TidalCLI:
                     self.state.tracks = tracks
                     self.state.track_cursor = 0
                     self.state.playlist_name = playlist_name
+                    self.state.search_results_mode = ""
+                    self.state.search_results_artists = []
+                    self.state.search_results_albums = []
                     self.state.status_message = ""
                 self.queue.set_tracks(tracks)
             except Exception as exc:
@@ -230,26 +268,118 @@ class TidalCLI:
 
         threading.Thread(target=loader, daemon=True, name="track-loader").start()
 
-    def _search_async(self, query: str) -> None:
+    def _search_async(self, query: str, search_type: SearchType = SearchType.ALL) -> None:
         """Execute a search in a background thread."""
         with self.state.lock:
-            self.state.status_message = f"Searching for '{query}'..."
+            type_label = search_type.value
+            self.state.status_message = f"Searching {type_label}: '{query}'..."
 
         def loader():
             try:
-                tracks = self.tidal.search_tracks(query)
+                if search_type == SearchType.TRACKS:
+                    tracks = self.tidal.search_tracks(query)
+                    with self.state.lock:
+                        self.state.tracks = tracks
+                        self.state.track_cursor = 0
+                        self.state.playlist_name = f"🔍 Tracks: {query}"
+                        self.state.active_panel = "content"
+                        self.state.search_results_mode = "tracks"
+                        self.state.search_results_artists = []
+                        self.state.search_results_albums = []
+                        self.state.status_message = ""
+                    self.queue.set_tracks(tracks)
+
+                elif search_type == SearchType.ARTISTS:
+                    artists = self.tidal.search_artists(query)
+                    with self.state.lock:
+                        self.state.tracks = []
+                        self.state.search_results_artists = artists
+                        self.state.search_results_albums = []
+                        self.state.track_cursor = 0
+                        self.state.playlist_name = f"🎤 Artists: {query}"
+                        self.state.active_panel = "content"
+                        self.state.search_results_mode = "artists"
+                        self.state.status_message = ""
+
+                elif search_type == SearchType.ALBUMS:
+                    albums = self.tidal.search_albums(query)
+                    with self.state.lock:
+                        self.state.tracks = []
+                        self.state.search_results_artists = []
+                        self.state.search_results_albums = albums
+                        self.state.track_cursor = 0
+                        self.state.playlist_name = f"💿 Albums: {query}"
+                        self.state.active_panel = "content"
+                        self.state.search_results_mode = "albums"
+                        self.state.status_message = ""
+
+                else:  # ALL
+                    results = self.tidal.search_all(query)
+                    tracks = results["tracks"]
+                    artists = results["artists"]
+                    albums = results["albums"]
+                    with self.state.lock:
+                        self.state.tracks = tracks
+                        self.state.search_results_artists = artists
+                        self.state.search_results_albums = albums
+                        self.state.track_cursor = 0
+                        self.state.playlist_name = f"🔍 All: {query}"
+                        self.state.active_panel = "content"
+                        self.state.search_results_mode = "all"
+                        self.state.status_message = ""
+                    self.queue.set_tracks(tracks)
+
+            except Exception as exc:
+                with self.state.lock:
+                    self.state.status_message = f"Error: {exc}"
+
+        threading.Thread(target=loader, daemon=True, name="search-loader").start()
+
+    def _load_artist_tracks_async(self, artist_id: str, artist_name: str) -> None:
+        """Load top tracks for an artist in a background thread."""
+        with self.state.lock:
+            self.state.status_message = f"Loading tracks for {artist_name}..."
+
+        def loader():
+            try:
+                tracks = self.tidal.get_artist_top_tracks(artist_id)
                 with self.state.lock:
                     self.state.tracks = tracks
                     self.state.track_cursor = 0
-                    self.state.playlist_name = f"Search: {query}"
-                    self.state.active_panel = "content"
+                    self.state.playlist_name = f"🎤 {artist_name}"
+                    self.state.search_results_mode = "tracks"
+                    self.state.search_results_artists = []
+                    self.state.search_results_albums = []
                     self.state.status_message = ""
                 self.queue.set_tracks(tracks)
             except Exception as exc:
                 with self.state.lock:
                     self.state.status_message = f"Error: {exc}"
 
-        threading.Thread(target=loader, daemon=True, name="search-loader").start()
+        threading.Thread(target=loader, daemon=True, name="artist-loader").start()
+
+    def _load_album_tracks_async(self, album_id: str, album_name: str) -> None:
+        """Load tracks from an album in a background thread."""
+        with self.state.lock:
+            self.state.status_message = f"Loading {album_name}..."
+
+        def loader():
+            try:
+                tracks = self.tidal.get_album_tracks(album_id)
+                with self.state.lock:
+                    self.state.tracks = tracks
+                    self.state.track_cursor = 0
+                    self.state.playlist_name = f"💿 {album_name}"
+                    self.state.search_results_mode = "tracks"
+                    self.state.search_results_artists = []
+                    self.state.search_results_albums = []
+                    self.state.status_message = ""
+                self.queue.set_tracks(tracks)
+            except Exception as exc:
+                with self.state.lock:
+                    self.state.status_message = f"Error: {exc}"
+
+        threading.Thread(target=loader, daemon=True, name="album-loader").start()
 
     # -- Action dispatcher ----------------------------------------------------
 
@@ -266,19 +396,31 @@ class TidalCLI:
                 self._handle_action(action)
 
     def _handle_search_key(self, key: str) -> None:
-        """Process keys while in search mode."""
+        """Process keys while in search mode.
+
+        Tab cycles the search type: ALL → TRACKS → ARTISTS → ALBUMS → ALL.
+        """
         if key == readchar.key.ESC:
             with self.state.lock:
                 self.state.input_mode = "normal"
                 self.state.search_query = ""
             return
-        
+
+        # Tab cycles through search types
+        if key == "\t":
+            cycle = [SearchType.ALL, SearchType.TRACKS, SearchType.ARTISTS, SearchType.ALBUMS]
+            with self.state.lock:
+                idx = cycle.index(self.state.search_type)
+                self.state.search_type = cycle[(idx + 1) % len(cycle)]
+            return
+
         if key in ("\r", "\n", readchar.key.ENTER):
             with self.state.lock:
                 query = self.state.search_query
+                search_type = self.state.search_type
                 self.state.input_mode = "normal"
             if query.strip():
-                self._search_async(query.strip())
+                self._search_async(query.strip(), search_type)
             return
             
         if key in (readchar.key.BACKSPACE, "\x7f", "\x08"):
@@ -311,6 +453,7 @@ class TidalCLI:
             "focus_content": self._action_focus_content,
             "toggle_search": self._action_toggle_search,
             "toggle_favorite": self._action_toggle_favorite,
+            "retry_playlists": self._action_retry_playlists,
         }
         handler = handlers.get(action)
         if handler:
@@ -383,7 +526,19 @@ class TidalCLI:
                     max_idx, self.state.playlist_cursor + 1
                 )
             else:
-                max_idx = max(0, len(self.state.tracks) - 1)
+                # Determine list length based on search results mode
+                if self.state.search_results_mode == "artists":
+                    max_idx = max(0, len(self.state.search_results_artists) - 1)
+                elif self.state.search_results_mode == "albums":
+                    max_idx = max(0, len(self.state.search_results_albums) - 1)
+                elif self.state.search_results_mode == "all":
+                    # In "all" mode, combined list: artists + albums + tracks
+                    total = (len(self.state.search_results_artists)
+                             + len(self.state.search_results_albums)
+                             + len(self.state.tracks))
+                    max_idx = max(0, total - 1)
+                else:
+                    max_idx = max(0, len(self.state.tracks) - 1)
                 self.state.track_cursor = min(max_idx, self.state.track_cursor + 1)
 
     def _action_focus_sidebar(self) -> None:
@@ -398,6 +553,15 @@ class TidalCLI:
         with self.state.lock:
             self.state.input_mode = "search"
             self.state.search_query = ""
+            self.state.search_type = SearchType.ALL
+
+    def _action_retry_playlists(self) -> None:
+        """Retry loading playlists after an error."""
+        with self.state.lock:
+            self.state.sidebar_error = ""
+            self.state.playlists = []
+            self.state.status_message = "Retrying..."
+        self._load_playlists_async()
 
     def _action_toggle_favorite(self) -> None:
         track = None
@@ -431,6 +595,9 @@ class TidalCLI:
     def _action_select(self) -> None:
         playlist_to_load: tuple[str, str] | None = None
         track_index: int | None = None
+        artist_to_load: tuple[str, str] | None = None
+        album_to_load: tuple[str, str] | None = None
+
         with self.state.lock:
             if self.state.active_panel == "sidebar":
                 if self.state.playlists and self.state.playlist_cursor < len(
@@ -440,13 +607,48 @@ class TidalCLI:
                     playlist_to_load = (pl.id, pl.name)
                     self.state.active_panel = "content"
             else:
-                if self.state.tracks and self.state.track_cursor < len(
-                    self.state.tracks
-                ):
-                    track_index = self.state.track_cursor
+                mode = self.state.search_results_mode
+                cursor = self.state.track_cursor
+
+                if mode == "artists":
+                    if self.state.search_results_artists and cursor < len(
+                        self.state.search_results_artists
+                    ):
+                        a = self.state.search_results_artists[cursor]
+                        artist_to_load = (a.id, a.name)
+
+                elif mode == "albums":
+                    if self.state.search_results_albums and cursor < len(
+                        self.state.search_results_albums
+                    ):
+                        a = self.state.search_results_albums[cursor]
+                        album_to_load = (a.id, a.name)
+
+                elif mode == "all":
+                    # Combined list: artists, then albums, then tracks
+                    n_artists = len(self.state.search_results_artists)
+                    n_albums = len(self.state.search_results_albums)
+                    if cursor < n_artists:
+                        a = self.state.search_results_artists[cursor]
+                        artist_to_load = (a.id, a.name)
+                    elif cursor < n_artists + n_albums:
+                        a = self.state.search_results_albums[cursor - n_artists]
+                        album_to_load = (a.id, a.name)
+                    else:
+                        track_idx = cursor - n_artists - n_albums
+                        if self.state.tracks and track_idx < len(self.state.tracks):
+                            track_index = track_idx
+
+                else:
+                    if self.state.tracks and cursor < len(self.state.tracks):
+                        track_index = cursor
 
         if playlist_to_load:
             self._load_tracks_async(*playlist_to_load)
+        elif artist_to_load:
+            self._load_artist_tracks_async(*artist_to_load)
+        elif album_to_load:
+            self._load_album_tracks_async(*album_to_load)
         elif track_index is not None:
             self._play_track_at(track_index)
 
