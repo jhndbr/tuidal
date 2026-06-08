@@ -30,6 +30,9 @@ class PlayerBackend:
             ytdl=False,
             input_default_bindings=False,
             input_vo_keyboard=False,
+            # === Audio quality settings ===
+            audio_channels="auto",        # Preserve original channel layout
+            audio_pitch_correction="no",  # No unnecessary DSP processing
         )
         self._user_stopped = False
 

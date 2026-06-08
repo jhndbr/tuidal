@@ -13,7 +13,7 @@ from tidal_tui.ui.playlist_panel import render_playlist_panel
 from tidal_tui.ui.track_panel import render_track_table
 
 if TYPE_CHECKING:
-    from tidal_tui.app import AppState
+    from tidal_tui.models import AppState
 
 
 def _render_header(state: AppState) -> Text:
@@ -76,7 +76,6 @@ def build_layout(state: AppState, term_height: int = 24) -> Layout:
     layout.split_column(
         Layout(name="header", size=1),
         Layout(name="body"),
-        Layout(name="now_playing", size=5),
         Layout(name="footer", size=1),
     )
 
@@ -89,14 +88,26 @@ def build_layout(state: AppState, term_height: int = 24) -> Layout:
         Layout(name="content"),
     )
 
-    # Sidebar
+    # Split Sidebar
+    layout["sidebar"].split_column(
+        Layout(name="playlists"),
+        Layout(name="album_art", size=16),
+    )
+
+    # Split Content
+    layout["content"].split_column(
+        Layout(name="track_list"),
+        Layout(name="now_playing", size=5),
+    )
+
+    # -- Playlists
     playlist_content = render_playlist_panel(
         playlists=state.playlists,
         cursor=state.playlist_cursor,
         active=state.active_panel == "sidebar",
         error=state.sidebar_error,
     )
-    layout["sidebar"].update(
+    layout["playlists"].update(
         Panel(
             playlist_content,
             title="Playlists",
@@ -107,8 +118,19 @@ def build_layout(state: AppState, term_height: int = 24) -> Layout:
         )
     )
 
-    # Content
-    body_height = max(5, term_height - 8)  # header(1) + np(5) + footer(1) + borders(~1)
+    # -- Album Art
+    art = Text.from_ansi(state.album_art_text) if state.album_art_text else Text("\n" * 6 + " " * 8 + "No Art")
+    layout["album_art"].update(
+        Panel(
+            art,
+            border_style="border",
+            box=box.ROUNDED,
+            padding=(0, 0),
+        )
+    )
+
+    # -- Track List
+    body_height = max(5, term_height - 8)  # header(1) + footer(1) + np(5) + borders(~1)
     track_table = render_track_table(
         tracks=state.tracks,
         playlist_name=state.playlist_name,
@@ -121,7 +143,7 @@ def build_layout(state: AppState, term_height: int = 24) -> Layout:
         search_results_artists=state.search_results_artists,
         search_results_albums=state.search_results_albums,
     )
-    layout["content"].update(
+    layout["track_list"].update(
         Panel(
             track_table,
             border_style="track.header" if state.active_panel == "content" else "border",

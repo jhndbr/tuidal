@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import threading
 from typing import Union
 
 
@@ -217,3 +218,59 @@ class QueueState:
         """Toggle shuffle on/off."""
         self.shuffle = not self.shuffle
         return self.shuffle
+
+
+@dataclass
+class AppState:
+    """Shared application state — updated by daemon events."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    # -- Playlists
+    playlists: list = field(default_factory=list)
+    playlist_name: str = ""
+    playlist_cursor: int = 0
+    sidebar_error: str = ""
+
+    # -- Tracks
+    tracks: list = field(default_factory=list)
+    track_cursor: int = 0
+    playing_id: str | None = None
+    favorite_track_ids: set[str] = field(default_factory=set)
+
+    # -- Playback
+    track_title: str = "No track playing"
+    album_art_url: str | None = None
+    album_art_text: str = ""
+    position: float = 0.0
+    duration: float = 0.0
+    volume: int = 75
+    is_paused: bool = True
+
+    # -- Queue state
+    shuffle: bool = False
+    repeat: RepeatMode = RepeatMode.OFF
+
+    # -- UI focus
+    active_panel: str = "sidebar"
+    input_mode: str = "normal"
+    search_query: str = ""
+    search_type: SearchType = SearchType.ALL
+
+    # -- Search results
+    search_results_artists: list = field(default_factory=list)
+    search_results_albums: list = field(default_factory=list)
+    search_results_mode: str = ""
+
+    # -- App control
+    running: bool = True
+    status_message: str = ""
+
+    @property
+    def repeat_label(self) -> str:
+        """Human-readable repeat mode."""
+        return {
+            RepeatMode.OFF: "off",
+            RepeatMode.ALL: "all",
+            RepeatMode.ONE: "one",
+        }[self.repeat]

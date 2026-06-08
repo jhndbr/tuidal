@@ -29,6 +29,7 @@ dependencies = [
     "readchar>=4.0",
     "tidalapi>=0.6.11",
     "python-mpv>=1.0.3",
+    "mpris_server>=0.4.1",
 ]
 
 [project.optional-dependencies]

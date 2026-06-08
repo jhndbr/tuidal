@@ -6,12 +6,54 @@ or swap to a different backend.
 """
 from __future__ import annotations
 
+import time
+from typing import Any
+
 import tidalapi
 import tidalapi.album as tidal_album
 import tidalapi.artist as tidal_artist
 
 from tidal_tui.config import load_session_tokens, save_session_tokens
 from tidal_tui.models import AlbumInfo, ArtistInfo, PlaylistInfo, SearchType, TrackInfo
+
+
+# ---------------------------------------------------------------------------
+# Simple in-memory TTL cache (no extra dependencies needed)
+# ---------------------------------------------------------------------------
+
+class _TTLCache:
+    """Minimal TTL cache — avoids redundant API calls.
+
+    Each entry expires after *default_ttl* seconds. Thread-safe enough
+    for our use case (dict ops are atomic in CPython).
+    """
+
+    def __init__(self, default_ttl: float = 300.0) -> None:
+        self._store: dict[str, tuple[float, Any]] = {}  # key → (expiry_ts, value)
+        self._default_ttl = default_ttl
+
+    def get(self, key: str) -> Any | None:
+        """Return cached value if still valid, else None."""
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        expiry, value = entry
+        if time.monotonic() > expiry:
+            del self._store[key]
+            return None
+        return value
+
+    def set(self, key: str, value: Any, ttl: float | None = None) -> None:
+        """Store a value with optional per-key TTL override."""
+        self._store[key] = (time.monotonic() + (ttl or self._default_ttl), value)
+
+    def invalidate(self, key: str) -> None:
+        """Remove a single key."""
+        self._store.pop(key, None)
+
+    def clear(self) -> None:
+        """Drop everything."""
+        self._store.clear()
 
 
 # Maps user-facing quality names to tidalapi enum values.
@@ -54,10 +96,18 @@ class TidalService:
         url = svc.resolve_stream_url(tracks[0].id)
     """
 
+    # Cache TTLs (seconds)
+    _PLAYLISTS_TTL = 300.0       # 5 min — playlist list rarely changes mid-session
+    _PLAYLIST_TRACKS_TTL = 180.0 # 3 min — tracks in a playlist
+    _ALBUM_TRACKS_TTL = 600.0    # 10 min — album contents almost never change
+    _ARTIST_TRACKS_TTL = 300.0   # 5 min — artist top tracks
+    _FAVORITES_TTL = 120.0       # 2 min — favorites may change from other devices
+
     def __init__(self, quality: str = "high") -> None:
         tidal_quality = _QUALITY_MAP.get(quality, _DEFAULT_QUALITY)
         config = tidalapi.Config(quality=tidal_quality)
         self._session = tidalapi.Session(config)
+        self._cache = _TTLCache()
 
     # -- Authentication -------------------------------------------------------
 
@@ -109,7 +159,13 @@ class TidalService:
         does a synchronous GET request for *every single playlist* to fetch
         details, which fails the entire batch if Tidal returns a 500 Server Error
         for any individual playlist.
+
+        Results are cached for 5 minutes to avoid redundant API calls.
         """
+        cached = self._cache.get("playlists")
+        if cached is not None:
+            return cached
+
         result: list[PlaylistInfo] = []
         try:
             # Fetch the raw JSON containing all playlists in one request
@@ -129,12 +185,19 @@ class TidalService:
                     )
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch playlists: {exc}") from exc
+
+        self._cache.set("playlists", result, self._PLAYLISTS_TTL)
         return result
 
     # -- Tracks ---------------------------------------------------------------
 
     def get_playlist_tracks(self, playlist_id: str) -> list[TrackInfo]:
-        """Fetch all tracks for a given playlist."""
+        """Fetch all tracks for a given playlist (cached 3 min)."""
+        cache_key = f"playlist_tracks:{playlist_id}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         result: list[TrackInfo] = []
         try:
             playlist = self._get_playlist(playlist_id)
@@ -143,6 +206,8 @@ class TidalService:
                 result.append(self._track_to_info(track, i))
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch tracks: {exc}") from exc
+
+        self._cache.set(cache_key, result, self._PLAYLIST_TRACKS_TTL)
         return result
 
     def search_tracks(self, query: str, limit: int = 50) -> list[TrackInfo]:
@@ -243,7 +308,12 @@ class TidalService:
             raise RuntimeError(f"Search failed: {exc}") from exc
 
     def get_artist_top_tracks(self, artist_id: str, limit: int = 50) -> list[TrackInfo]:
-        """Fetch the top tracks for an artist."""
+        """Fetch the top tracks for an artist (cached 5 min)."""
+        cache_key = f"artist_tracks:{artist_id}:{limit}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         result: list[TrackInfo] = []
         try:
             artist = self._session.artist(artist_id)
@@ -252,10 +322,17 @@ class TidalService:
                 result.append(self._track_to_info(track, i))
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch artist tracks: {exc}") from exc
+
+        self._cache.set(cache_key, result, self._ARTIST_TRACKS_TTL)
         return result
 
     def get_album_tracks(self, album_id: str) -> list[TrackInfo]:
-        """Fetch all tracks from an album."""
+        """Fetch all tracks from an album (cached 10 min)."""
+        cache_key = f"album_tracks:{album_id}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         result: list[TrackInfo] = []
         try:
             album = self._session.album(album_id)
@@ -264,10 +341,16 @@ class TidalService:
                 result.append(self._track_to_info(track, i))
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch album tracks: {exc}") from exc
+
+        self._cache.set(cache_key, result, self._ALBUM_TRACKS_TTL)
         return result
 
     def get_favorite_tracks(self) -> list[TrackInfo]:
-        """Fetch user's favorite tracks."""
+        """Fetch user's favorite tracks (cached 2 min)."""
+        cached = self._cache.get("favorites")
+        if cached is not None:
+            return cached
+
         result: list[TrackInfo] = []
         try:
             if hasattr(self._session.user, "favorites") and self._session.user.favorites:
@@ -276,6 +359,8 @@ class TidalService:
                     result.append(self._track_to_info(track, i))
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch favorites: {exc}") from exc
+
+        self._cache.set("favorites", result, self._FAVORITES_TTL)
         return result
 
     def toggle_favorite(self, track_id: str, is_favorite: bool) -> None:
@@ -287,8 +372,14 @@ class TidalService:
                 self._session.user.favorites.add_track(track_id)
             else:
                 self._session.user.favorites.remove_track(track_id)
+            # Invalidate favorites cache so next fetch reflects the change
+            self._cache.invalidate("favorites")
         except Exception as exc:
             raise RuntimeError(f"Failed to toggle favorite: {exc}") from exc
+
+    def clear_cache(self) -> None:
+        """Drop all cached data (useful after account changes or errors)."""
+        self._cache.clear()
 
     def _get_playlist(self, playlist_id: str):
         """Get a playlist object by ID, trying multiple APIs."""
@@ -346,8 +437,16 @@ class TidalService:
                 pass
 
         album_name = ""
+        album_art_url = None
         if hasattr(track, "album") and track.album is not None:
             album_name = getattr(track.album, "name", "")
+            try:
+                if hasattr(track.album, "image"):
+                    album_art_url = track.album.image(640, 640)
+                elif hasattr(track.album, "picture"):
+                    album_art_url = track.album.picture(640, 640)
+            except Exception:
+                pass
 
         duration = getattr(track, "duration", 0) or 0
 
@@ -359,6 +458,7 @@ class TidalService:
             artist=artist_name,
             album=album_name,
             duration_seconds=float(duration),
+            album_art_url=album_art_url,
             track_number=index,
         )
 
