@@ -31,26 +31,40 @@ def _render_artist_table(
         title_justify="left",
     )
 
+    total_len = len(artists)
+    is_scrollable = max_rows and total_len > max_rows
+
+    if is_scrollable:
+        half = max_rows // 2
+        start = max(0, cursor - half)
+        start = min(start, total_len - max_rows)
+        end = start + max_rows
+        visible = list(enumerate(artists))[start:end]
+
+        # Scrollbar math
+        thumb_height = max(1, int(max_rows * max_rows / total_len))
+        max_start = total_len - max_rows
+        if max_start > 0:
+            thumb_start = int(start * (max_rows - thumb_height) / max_start)
+        else:
+            thumb_start = 0
+    else:
+        visible = list(enumerate(artists))
+        max_rows = total_len
+
     table.add_column("#", width=4, justify="right", style="track.number")
     table.add_column("", width=3)
     table.add_column("Artist", ratio=4, no_wrap=True)
     table.add_column("", ratio=2, no_wrap=True)
-    table.add_column("", width=6, justify="right")
+    if is_scrollable:
+        table.add_column("", width=1)
+    else:
+        table.add_column("", width=6, justify="right")
 
     if not artists:
         return table
 
-    # Viewport scrolling
-    if max_rows and len(artists) > max_rows:
-        half = max_rows // 2
-        start = max(0, cursor - half)
-        start = min(start, len(artists) - max_rows)
-        end = start + max_rows
-        visible = list(enumerate(artists))[start:end]
-    else:
-        visible = list(enumerate(artists))
-
-    for i, artist in visible:
+    for idx_in_visible, (i, artist) in enumerate(visible):
         is_selected = i == cursor and active
 
         num = Text(str(i + 1))
@@ -61,14 +75,22 @@ def _render_artist_table(
         else:
             style = "track.normal"
 
-        table.add_row(
+        row_cells = [
             num,
             icon,
             Text(artist.name, style=style, overflow="ellipsis"),
             Text("Enter to browse", style="dim" if not is_selected else style),
-            Text(""),
-            style=style,
-        )
+        ]
+        if is_scrollable:
+            is_thumb = (thumb_start <= idx_in_visible < thumb_start + thumb_height)
+            if is_thumb:
+                row_cells.append(Text("█", style="bold cyan"))
+            else:
+                row_cells.append(Text("│", style="bright_black"))
+        else:
+            row_cells.append(Text(""))
+
+        table.add_row(*row_cells, style=style)
 
     return table
 
@@ -94,26 +116,39 @@ def _render_album_table(
         title_justify="left",
     )
 
+    total_len = len(albums)
+    is_scrollable = max_rows and total_len > max_rows
+
+    if is_scrollable:
+        half = max_rows // 2
+        start = max(0, cursor - half)
+        start = min(start, total_len - max_rows)
+        end = start + max_rows
+        visible = list(enumerate(albums))[start:end]
+
+        # Scrollbar math
+        thumb_height = max(1, int(max_rows * max_rows / total_len))
+        max_start = total_len - max_rows
+        if max_start > 0:
+            thumb_start = int(start * (max_rows - thumb_height) / max_start)
+        else:
+            thumb_start = 0
+    else:
+        visible = list(enumerate(albums))
+        max_rows = total_len
+
     table.add_column("#", width=4, justify="right", style="track.number")
     table.add_column("Album", ratio=3, no_wrap=True)
     table.add_column("Artist", ratio=2, no_wrap=True)
     table.add_column("Year", width=6, justify="right")
     table.add_column("Tracks", width=6, justify="right", style="track.number")
+    if is_scrollable:
+        table.add_column("", width=1)
 
     if not albums:
         return table
 
-    # Viewport scrolling
-    if max_rows and len(albums) > max_rows:
-        half = max_rows // 2
-        start = max(0, cursor - half)
-        start = min(start, len(albums) - max_rows)
-        end = start + max_rows
-        visible = list(enumerate(albums))[start:end]
-    else:
-        visible = list(enumerate(albums))
-
-    for i, album in visible:
+    for idx_in_visible, (i, album) in enumerate(visible):
         is_selected = i == cursor and active
 
         num = Text(str(i + 1))
@@ -126,14 +161,21 @@ def _render_album_table(
         year_str = str(album.year) if album.year else ""
         tracks_str = str(album.num_tracks) if album.num_tracks else ""
 
-        table.add_row(
+        row_cells = [
             num,
             Text(f"💿 {album.name}", style=style, overflow="ellipsis"),
             Text(album.artist, style=style, overflow="ellipsis"),
             Text(year_str),
             Text(tracks_str),
-            style=style,
-        )
+        ]
+        if is_scrollable:
+            is_thumb = (thumb_start <= idx_in_visible < thumb_start + thumb_height)
+            if is_thumb:
+                row_cells.append(Text("█", style="bold cyan"))
+            else:
+                row_cells.append(Text("│", style="bright_black"))
+
+        table.add_row(*row_cells, style=style)
 
     return table
 
@@ -163,12 +205,6 @@ def _render_all_results_table(
         title_justify="left",
     )
 
-    table.add_column("#", width=4, justify="right", style="track.number")
-    table.add_column("Type", width=8)
-    table.add_column("Title / Name", ratio=3, no_wrap=True)
-    table.add_column("Artist", ratio=2, no_wrap=True)
-    table.add_column("Info", width=10, justify="right", style="track.number")
-
     # Build a combined list of rows
     rows: list[tuple[str, str, str, str, str, str | None]] = []
     # type, label, display_name, artist_or_info, extra, track_id_or_none
@@ -184,20 +220,39 @@ def _render_all_results_table(
         title_text = f"♥ {track.title}" if track.id in favorite_track_ids else track.title
         rows.append(("♪", "Track", title_text, track.artist, track.duration_display, track.id))
 
+    total_len = len(rows)
+    is_scrollable = max_rows and total_len > max_rows
+
+    if is_scrollable:
+        half = max_rows // 2
+        start = max(0, cursor - half)
+        start = min(start, total_len - max_rows)
+        end = start + max_rows
+        visible = list(enumerate(rows))[start:end]
+
+        # Scrollbar math
+        thumb_height = max(1, int(max_rows * max_rows / total_len))
+        max_start = total_len - max_rows
+        if max_start > 0:
+            thumb_start = int(start * (max_rows - thumb_height) / max_start)
+        else:
+            thumb_start = 0
+    else:
+        visible = list(enumerate(rows))
+        max_rows = total_len
+
+    table.add_column("#", width=4, justify="right", style="track.number")
+    table.add_column("Type", width=8)
+    table.add_column("Title / Name", ratio=3, no_wrap=True)
+    table.add_column("Artist", ratio=2, no_wrap=True)
+    table.add_column("Info", width=10, justify="right", style="track.number")
+    if is_scrollable:
+        table.add_column("", width=1)
+
     if not rows:
         return table
 
-    # Viewport scrolling
-    if max_rows and len(rows) > max_rows:
-        half = max_rows // 2
-        start = max(0, cursor - half)
-        start = min(start, len(rows) - max_rows)
-        end = start + max_rows
-        visible = list(enumerate(rows))[start:end]
-    else:
-        visible = list(enumerate(rows))
-
-    for i, (icon, type_label, name, artist, extra, track_id) in visible:
+    for idx_in_visible, (i, (icon, type_label, name, artist, extra, track_id)) in enumerate(visible):
         is_playing = track_id is not None and track_id == playing_id
         is_selected = i == cursor and active
 
@@ -217,14 +272,21 @@ def _render_all_results_table(
 
         type_text = Text(f"{icon} {type_label}", style="bold magenta" if type_label != "Track" else style)
 
-        table.add_row(
+        row_cells = [
             num,
             type_text,
             Text(name, style=style, overflow="ellipsis"),
             Text(artist, style=style, overflow="ellipsis"),
             Text(extra),
-            style=style,
-        )
+        ]
+        if is_scrollable:
+            is_thumb = (thumb_start <= idx_in_visible < thumb_start + thumb_height)
+            if is_thumb:
+                row_cells.append(Text("█", style="bold cyan"))
+            else:
+                row_cells.append(Text("│", style="bright_black"))
+
+        table.add_row(*row_cells, style=style)
 
     return table
 
@@ -307,32 +369,39 @@ def render_track_table(
         title_justify="left",
     )
 
+    total_len = len(tracks)
+    is_scrollable = max_rows and total_len > max_rows
+
+    if is_scrollable:
+        half = max_rows // 2
+        start = max(0, cursor - half)
+        start = min(start, total_len - max_rows)
+        end = start + max_rows
+        visible = list(enumerate(tracks))[start:end]
+
+        # Scrollbar math
+        thumb_height = max(1, int(max_rows * max_rows / total_len))
+        max_start = total_len - max_rows
+        if max_start > 0:
+            thumb_start = int(start * (max_rows - thumb_height) / max_start)
+        else:
+            thumb_start = 0
+    else:
+        visible = list(enumerate(tracks))
+        max_rows = total_len
+
     table.add_column("#", width=4, justify="right", style="track.number")
     table.add_column("Title", ratio=3, no_wrap=True)
     table.add_column("Artist", ratio=2, no_wrap=True)
     table.add_column("Album", ratio=2, no_wrap=True)
     table.add_column("Time", width=6, justify="right", style="track.number")
+    if is_scrollable:
+        table.add_column("", width=1)
 
     if not tracks:
         return table
 
-    # Viewport scrolling: show a window of tracks around the cursor
-    if max_rows and len(tracks) > max_rows:
-        half = max_rows // 2
-        start = max(0, cursor - half)
-        start = min(start, len(tracks) - max_rows)
-        end = start + max_rows
-        visible = list(enumerate(tracks))[start:end]
-    else:
-        visible = list(enumerate(tracks))
-
-    # Remove duplicate tracks for display
-    seen: set[str] = set()
-    for i, track in visible:
-        if track.id in seen:
-            continue
-        seen.add(track.id)
-
+    for idx_in_visible, (i, track) in enumerate(visible):
         is_playing = track.id == playing_id
         is_selected = i == cursor and active
 
@@ -352,13 +421,20 @@ def render_track_table(
 
         title_text = f"♥ {track.title}" if track.id in favorite_track_ids else track.title
 
-        table.add_row(
+        row_cells = [
             num,
             Text(title_text, style=style, overflow="ellipsis"),
             Text(track.artist, style=style, overflow="ellipsis"),
             Text(track.album, style=style, overflow="ellipsis"),
             Text(track.duration_display),
-            style=style,
-        )
+        ]
+        if is_scrollable:
+            is_thumb = (thumb_start <= idx_in_visible < thumb_start + thumb_height)
+            if is_thumb:
+                row_cells.append(Text("█", style="bold cyan"))
+            else:
+                row_cells.append(Text("│", style="bright_black"))
+
+        table.add_row(*row_cells, style=style)
 
     return table

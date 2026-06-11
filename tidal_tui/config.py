@@ -21,7 +21,7 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 class AppConfig:
     """User-facing application settings."""
 
-    audio_quality: str = "HIGH"
+    audio_quality: str = "high"
     volume: int = 75
 
     @classmethod

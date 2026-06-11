@@ -18,8 +18,8 @@ def main() -> None:
     parser.add_argument(
         "--quality",
         choices=["low", "high", "lossless", "max"],
-        default="high",
-        help="Audio streaming quality (default: high / AAC 320kbps)",
+        default=None,
+        help="Audio streaming quality (default: from config or 'high' / AAC 320kbps)",
     )
     parser.add_argument(
         "--logout",
@@ -45,6 +45,18 @@ def main() -> None:
         print("   Run: uv sync")
         sys.exit(1)
 
+    # -- Load configuration ---------------------------------------------------
+
+    from tidal_tui.config import AppConfig
+
+    app_config = AppConfig.load()
+
+    # CLI --quality flag overrides the saved config
+    if args.quality is not None:
+        app_config.audio_quality = args.quality
+
+    quality = app_config.audio_quality
+
     # -- Logout ---------------------------------------------------------------
 
     if args.logout:
@@ -58,7 +70,7 @@ def main() -> None:
     from tidal_tui.services.tidal_service import TidalService
 
     print("🔐 Connecting to Tidal...")
-    service = TidalService(quality=args.quality)
+    service = TidalService(quality=quality)
     try:
         service.authenticate()
     except Exception as exc:
@@ -72,7 +84,7 @@ def main() -> None:
 
     from tidal_tui.app import TidalCLI
 
-    app = TidalCLI(tidal_service=service, quality=args.quality)
+    app = TidalCLI(tidal_service=service, quality=quality, config=app_config)
     app.run()
 
 

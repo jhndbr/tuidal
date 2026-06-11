@@ -1,4 +1,4 @@
-"""Now-playing renderer — progress bar, track info, and volume."""
+"""Now-playing renderer — progress bar, track info, volume, and mode status."""
 from __future__ import annotations
 
 from rich.text import Text
@@ -34,7 +34,12 @@ def render_now_playing(
     is_paused: bool,
     bar_width: int = 40,
 ) -> Text:
-    """Render the complete now-playing section as Rich Text."""
+    """Render the complete now-playing section as Rich Text.
+
+    Produces 2 lines:
+      1. Play state icon + track title
+      2. Time elapsed + progress bar + total time + volume
+    """
     result = Text()
 
     # Line 1: play state + track title
@@ -42,7 +47,9 @@ def render_now_playing(
         result.append("  ⏸ ", style="np.icon.pause")
     else:
         result.append("  ▶ ", style="np.icon.play")
-    result.append(track_title, style="np.title")
+    max_title_len = max(20, bar_width + 20)
+    truncated_title = track_title if len(track_title) <= max_title_len else track_title[:max_title_len - 3] + "..."
+    result.append(truncated_title, style="np.title")
     result.append("\n")
 
     # Line 2: time + progress bar + time + volume

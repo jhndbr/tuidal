@@ -1,8 +1,11 @@
 """Rich theme for Tidal CLI — ANSI terminal-native colors.
 
-Uses color_system="standard" to emit pure ANSI escape codes.
-This means 'cyan' becomes \\033[36m which the terminal renders
-using its own palette (Catppuccin, Dracula, Gruvbox, etc.).
+Uses color_system="256" which emits standard 256-color ANSI escape codes.
+Colors 0-15 in the 256-color cube are identical to the terminal's 16 basic
+ANSI colors, so theme colors like "cyan" / "bold yellow" / "bright_black"
+still render through the terminal's own palette (Catppuccin, Dracula, etc.).
+Using "256" (not "standard") is required to correctly display chafa's
+256-color album art without color degradation.
 """
 from __future__ import annotations
 
@@ -49,5 +52,5 @@ PLAYER_THEME = Theme(
 console = Console(
     theme=PLAYER_THEME,
     highlight=False,
-    color_system="standard",
+    color_system="256",  # 256-color: required for chafa art + palette-compatible basic colors
 )

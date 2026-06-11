@@ -6,6 +6,7 @@ both tidalapi and Textual.
 """
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Union
@@ -125,22 +126,39 @@ class QueueState:
     """Mutable playback queue with shuffle and repeat support.
 
     Manages track ordering and navigation (next/prev/select).
+    Shuffle is implemented via a pre-generated shuffled index list,
+    so every track plays exactly once before any repeats.
     Designed to be owned by the app layer and queried by widgets.
     """
 
     tracks: list[TrackInfo] = field(default_factory=list)
-    current_index: int = -1
+    current_index: int = -1  # position index into _play_order
     shuffle: bool = False
     repeat: RepeatMode = RepeatMode.OFF
+
+    # Internal: the order in which tracks will be played.
+    # In normal mode: [0, 1, 2, ..., N-1]
+    # In shuffle mode: a random permutation of the above
+    _play_order: list[int] = field(default_factory=list, repr=False)
 
     # -- Current track --
 
     @property
     def current_track(self) -> TrackInfo | None:
         """Currently active track, or None if queue is empty/unstarted."""
-        if 0 <= self.current_index < len(self.tracks):
-            return self.tracks[self.current_index]
+        if not self._play_order or not (0 <= self.current_index < len(self._play_order)):
+            return None
+        track_idx = self._play_order[self.current_index]
+        if 0 <= track_idx < len(self.tracks):
+            return self.tracks[track_idx]
         return None
+
+    @property
+    def current_track_real_index(self) -> int:
+        """Real index into self.tracks for the current track (-1 if none)."""
+        if not self._play_order or not (0 <= self.current_index < len(self._play_order)):
+            return -1
+        return self._play_order[self.current_index]
 
     # -- Navigation helpers --
 
@@ -154,27 +172,58 @@ class QueueState:
 
     @property
     def next_index(self) -> int | None:
-        """Index of the next track, respecting repeat mode."""
-        if not self.tracks:
+        """Order-position index of the next track, respecting repeat mode.
+
+        Returns a position index into _play_order (NOT a direct track index).
+        """
+        if not self._play_order:
             return None
         if self.repeat == RepeatMode.ONE:
             return self.current_index
         nxt = self.current_index + 1
-        if nxt >= len(self.tracks):
+        if nxt >= len(self._play_order):
             return 0 if self.repeat == RepeatMode.ALL else None
         return nxt
 
     @property
     def prev_index(self) -> int | None:
-        """Index of the previous track, respecting repeat mode."""
-        if not self.tracks:
+        """Order-position index of the previous track, respecting repeat mode."""
+        if not self._play_order:
             return None
         if self.repeat == RepeatMode.ONE:
             return self.current_index
         prev = self.current_index - 1
         if prev < 0:
-            return len(self.tracks) - 1 if self.repeat == RepeatMode.ALL else None
+            return len(self._play_order) - 1 if self.repeat == RepeatMode.ALL else None
         return prev
+
+    @property
+    def next_track(self) -> TrackInfo | None:
+        """Peek at the next track without advancing the queue."""
+        idx = self.next_index
+        if idx is None:
+            return None
+        track_idx = self._play_order[idx]
+        if 0 <= track_idx < len(self.tracks):
+            return self.tracks[track_idx]
+        return None
+
+    # -- Internal helpers --
+
+    def _rebuild_play_order(self) -> None:
+        """Rebuild _play_order based on current shuffle setting."""
+        n = len(self.tracks)
+        order = list(range(n))
+        if self.shuffle:
+            random.shuffle(order)
+        self._play_order = order
+
+    def _order_index_for_track(self, track_real_index: int) -> int:
+        """Find the position in _play_order for a given real track index."""
+        try:
+            return self._play_order.index(track_real_index)
+        except ValueError:
+            return 0
 
     # -- Mutations --
 
@@ -182,11 +231,12 @@ class QueueState:
         """Replace the entire queue with new tracks."""
         self.tracks = list(tracks)
         self.current_index = -1
+        self._rebuild_play_order()
 
-    def select(self, index: int) -> TrackInfo | None:
-        """Jump to a specific track by index."""
-        if 0 <= index < len(self.tracks):
-            self.current_index = index
+    def select(self, real_index: int) -> TrackInfo | None:
+        """Jump to a specific track by its real index in self.tracks."""
+        if 0 <= real_index < len(self.tracks):
+            self.current_index = self._order_index_for_track(real_index)
             return self.current_track
         return None
 
@@ -214,6 +264,16 @@ class QueueState:
         return self.repeat
 
     def toggle_shuffle(self) -> bool:
-        """Toggle shuffle on/off."""
+        """Toggle shuffle on/off.
+
+        When enabling shuffle, rebuilds the play order as a random permutation
+        starting from the current track to preserve continuity.
+        When disabling, reverts to sequential order preserving the current track.
+        """
         self.shuffle = not self.shuffle
+        current_real = self.current_track_real_index
+        self._rebuild_play_order()
+        # Re-anchor current_index to the same real track after reordering
+        if current_real >= 0:
+            self.current_index = self._order_index_for_track(current_real)
         return self.shuffle

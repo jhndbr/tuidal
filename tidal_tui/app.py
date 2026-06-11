@@ -2,6 +2,13 @@
 
 Replaces the Textual App with a Rich-based fullscreen interface
 that uses the terminal's native ANSI color palette.
+
+Key improvements over v1:
+- Event-driven rendering: re-renders only on input/state-change, not every 50ms.
+- Race-condition fix: stale URL resolvers are discarded before playback.
+- Config persistence: volume is saved to disk on every change.
+- Gapless playback: next track is pre-fetched 10 s before the current one ends.
+- Advanced navigation: Page Up/Down (×10), Home, End.
 """
 
 from __future__ import annotations
@@ -13,7 +20,10 @@ from dataclasses import dataclass, field
 
 import readchar
 from rich.live import Live
+from rich.text import Text
 
+from tidal_tui.art_renderer import render_art
+from tidal_tui.config import AppConfig
 from tidal_tui.input import InputListener
 from tidal_tui.models import AlbumInfo, ArtistInfo, QueueState, RepeatMode, SearchType
 from tidal_tui.services.player_backend import PlayerBackend
@@ -40,6 +50,10 @@ KEY_MAP: dict[str, str] = {
     readchar.key.DOWN: "cursor_down",
     readchar.key.LEFT: "focus_sidebar",
     readchar.key.RIGHT: "focus_content",
+    readchar.key.PAGE_UP: "page_up",
+    readchar.key.PAGE_DOWN: "page_down",
+    readchar.key.HOME: "go_home",
+    readchar.key.END: "go_end",
     "j": "cursor_down",
     "k": "cursor_up",
     "h": "focus_sidebar",
@@ -48,6 +62,18 @@ KEY_MAP: dict[str, str] = {
     "f": "toggle_favorite",
     "R": "retry_playlists",
 }
+
+# How many items to skip when pressing Page Up/Down
+_PAGE_SIZE = 10
+
+# How many seconds before track end to begin preloading the next track
+_GAPLESS_PRELOAD_SECONDS = 10.0
+
+# Album art dimensions (must match sidebar content width)
+_ART_WIDTH = 26
+_ART_HEIGHT = 12
+# Only show art when terminal is tall enough to fit both playlists and art
+_MIN_TERM_FOR_ART = 30
 
 
 @dataclass
@@ -98,6 +124,10 @@ class AppState:
     running: bool = True
     status_message: str = ""
 
+    # -- Album art
+    art_url: str | None = None      # URL of the current track's cover image
+    art_text: Text | None = None    # Rendered art (set asynchronously)
+
     @property
     def repeat_label(self) -> str:
         """Human-readable repeat mode."""
@@ -115,13 +145,33 @@ class TidalCLI:
     All rendering uses ANSI colors that inherit the terminal's palette.
     """
 
-    def __init__(self, tidal_service: TidalService, quality: str = "high") -> None:
+    def __init__(
+        self,
+        tidal_service: TidalService,
+        quality: str = "high",
+        config: AppConfig | None = None,
+    ) -> None:
         self.tidal = tidal_service
         self.player = PlayerBackend()
         self.queue = QueueState()
         self.state = AppState()
         self.input = InputListener()
         self._quality = quality
+        self._config = config or AppConfig()
+
+        # Event that wakes the render loop — set by inputs, loaders and position changes.
+        self._render_event: threading.Event = threading.Event()
+
+        # Timestamp of the last position-change render trigger (throttle to 1/s)
+        self._last_position_render: float = 0.0
+
+        # Flag: True once we have started pre-loading the next gapless track
+        # so we don't trigger multiple concurrent preloads for the same track.
+        self._gapless_preloading: bool = False
+        self._preloaded_track = None
+
+        # Apply saved volume from config
+        self.state.volume = self._config.volume
 
     # -- Main entry point -----------------------------------------------------
 
@@ -130,6 +180,9 @@ class TidalCLI:
         self._setup_player_callbacks()
         self._load_playlists_async()
         self.input.start()
+
+        # Apply saved volume to mpv immediately
+        self.player.volume = self.state.volume
 
         try:
             term_size = os.get_terminal_size()
@@ -141,13 +194,18 @@ class TidalCLI:
             with Live(
                 build_layout(self.state, term_height),
                 console=console,
-                refresh_per_second=10,
+                refresh_per_second=4,   # Fallback: still refresh 4× per second as a safety net
                 screen=True,
                 vertical_overflow="crop",
             ) as live:
                 while self.state.running:
-                    # Process keyboard input
-                    for key in self.input.drain():
+                    # Block until there's something to render (or timeout safety net)
+                    self._render_event.wait(timeout=0.25)
+                    self._render_event.clear()
+
+                    # Process all pending keyboard input
+                    keys = self.input.drain()
+                    for key in keys:
                         self._handle_key(key)
 
                     # Update terminal size
@@ -159,7 +217,7 @@ class TidalCLI:
 
                     # Render
                     live.update(build_layout(self.state, term_height))
-                    time.sleep(0.05)
+
         except KeyboardInterrupt:
             pass
         finally:
@@ -172,20 +230,97 @@ class TidalCLI:
         self.player.on_time_change(self._on_time_change)
         self.player.on_duration_change(self._on_duration_change)
         self.player.on_track_end(self._on_track_end)
-        self.state.volume = int(self.player.volume)
+        self.player.on_time_remaining(self._on_time_remaining)
 
     def _on_time_change(self, position: float) -> None:
         with self.state.lock:
             self.state.position = position
+            is_paused = self.state.is_paused
+
+        # Throttle render triggers from position updates: max once per second,
+        # and only when the track is actually playing.
+        if not is_paused:
+            now = time.monotonic()
+            if now - self._last_position_render >= 1.0:
+                self._last_position_render = now
+                self._render_event.set()
 
     def _on_duration_change(self, duration: float) -> None:
         with self.state.lock:
             self.state.duration = duration
+        self._render_event.set()
 
     def _on_track_end(self) -> None:
-        self._action_next_track()
+        self._gapless_preloading = False
+        track = self._preloaded_track
+        if track is not None:
+            self._preloaded_track = None
+            nxt = self.queue.next_index
+            if nxt is not None:
+                self.queue.current_index = nxt
+            with self.state.lock:
+                self.state.playing_id = track.id
+                self.state.track_title = track.display_label
+                self.state.duration = track.duration_seconds
+                self.state.position = 0.0
+                self.state.art_url = None
+                self.state.art_text = None
+
+            # Kick off art download + render in background for newly started track
+            threading.Thread(
+                target=self._load_art_async,
+                args=(track,),
+                daemon=True,
+                name="art-loader",
+            ).start()
+            self._notify_render()
+        else:
+            self._action_next_track()
+
+    def _on_time_remaining(self, remaining: float) -> None:
+        """Triggered on every position update with seconds remaining in the track.
+
+        When we're close to the end, preload the next track URL into mpv's
+        internal playlist so playback is seamless (gapless).
+        """
+        if remaining > _GAPLESS_PRELOAD_SECONDS:
+            return
+        if self._gapless_preloading or self.player._gapless_queued:
+            return
+        if self.queue.next_track is None:
+            return
+        # Don't preload if already paused/stopped
+        with self.state.lock:
+            is_paused = self.state.is_paused
+        if is_paused:
+            return
+
+        self._gapless_preloading = True
+        next_track = self.queue.next_track
+        threading.Thread(
+            target=self._preload_next_track,
+            args=(next_track,),
+            daemon=True,
+            name="gapless-preloader",
+        ).start()
+
+    def _preload_next_track(self, track) -> None:
+        """Resolve the next track's URL and append it to mpv for gapless play."""
+        try:
+            url = self.tidal.resolve_stream_url(track.id)
+            if url:
+                self.player.append_to_queue(url)
+                self._preloaded_track = track
+        except Exception:
+            pass
+        finally:
+            self._gapless_preloading = False
 
     # -- Network loaders (background threads) ---------------------------------
+
+    def _notify_render(self) -> None:
+        """Signal the render loop that something changed."""
+        self._render_event.set()
 
     def _load_playlists_async(self) -> None:
         """Load playlists from Tidal in a background thread."""
@@ -215,7 +350,7 @@ class TidalCLI:
                 if fav_tracks:
                     fav_playlist = PlaylistInfo(
                         id="__favorites__",
-                        name="\u2764\ufe0f Favoritas",
+                        name="♥ Favoritas",
                         num_tracks=len(fav_tracks),
                         description="Tus canciones favoritas",
                     )
@@ -239,6 +374,8 @@ class TidalCLI:
                 with self.state.lock:
                     self.state.sidebar_error = str(exc)
                     self.state.status_message = "Error loading playlists (/ to search)"
+            finally:
+                self._notify_render()
 
         threading.Thread(target=loader, daemon=True, name="playlist-loader").start()
 
@@ -246,6 +383,7 @@ class TidalCLI:
         """Load tracks for a playlist in a background thread."""
         with self.state.lock:
             self.state.status_message = f"Loading {playlist_name}..."
+        self._notify_render()
 
         def loader():
             try:
@@ -265,6 +403,8 @@ class TidalCLI:
             except Exception as exc:
                 with self.state.lock:
                     self.state.status_message = f"Error: {exc}"
+            finally:
+                self._notify_render()
 
         threading.Thread(target=loader, daemon=True, name="track-loader").start()
 
@@ -273,6 +413,7 @@ class TidalCLI:
         with self.state.lock:
             type_label = search_type.value
             self.state.status_message = f"Searching {type_label}: '{query}'..."
+        self._notify_render()
 
         def loader():
             try:
@@ -332,6 +473,8 @@ class TidalCLI:
             except Exception as exc:
                 with self.state.lock:
                     self.state.status_message = f"Error: {exc}"
+            finally:
+                self._notify_render()
 
         threading.Thread(target=loader, daemon=True, name="search-loader").start()
 
@@ -339,6 +482,7 @@ class TidalCLI:
         """Load top tracks for an artist in a background thread."""
         with self.state.lock:
             self.state.status_message = f"Loading tracks for {artist_name}..."
+        self._notify_render()
 
         def loader():
             try:
@@ -355,6 +499,8 @@ class TidalCLI:
             except Exception as exc:
                 with self.state.lock:
                     self.state.status_message = f"Error: {exc}"
+            finally:
+                self._notify_render()
 
         threading.Thread(target=loader, daemon=True, name="artist-loader").start()
 
@@ -362,6 +508,7 @@ class TidalCLI:
         """Load tracks from an album in a background thread."""
         with self.state.lock:
             self.state.status_message = f"Loading {album_name}..."
+        self._notify_render()
 
         def loader():
             try:
@@ -378,6 +525,8 @@ class TidalCLI:
             except Exception as exc:
                 with self.state.lock:
                     self.state.status_message = f"Error: {exc}"
+            finally:
+                self._notify_render()
 
         threading.Thread(target=loader, daemon=True, name="album-loader").start()
 
@@ -394,6 +543,9 @@ class TidalCLI:
             action = KEY_MAP.get(key)
             if action:
                 self._handle_action(action)
+
+        # Every keystroke unconditionally triggers a render
+        self._notify_render()
 
     def _handle_search_key(self, key: str) -> None:
         """Process keys while in search mode.
@@ -422,12 +574,12 @@ class TidalCLI:
             if query.strip():
                 self._search_async(query.strip(), search_type)
             return
-            
+
         if key in (readchar.key.BACKSPACE, "\x7f", "\x08"):
             with self.state.lock:
                 self.state.search_query = self.state.search_query[:-1]
             return
-            
+
         # Only accept printable characters (crude check, but works for most TUI)
         if len(key) == 1 and key.isprintable():
             with self.state.lock:
@@ -454,6 +606,10 @@ class TidalCLI:
             "toggle_search": self._action_toggle_search,
             "toggle_favorite": self._action_toggle_favorite,
             "retry_playlists": self._action_retry_playlists,
+            "page_up": self._action_page_up,
+            "page_down": self._action_page_down,
+            "go_home": self._action_go_home,
+            "go_end": self._action_go_end,
         }
         handler = handlers.get(action)
         if handler:
@@ -471,27 +627,43 @@ class TidalCLI:
     def _action_next_track(self) -> None:
         nxt = self.queue.next_index
         if nxt is not None:
-            self._play_track_at(nxt)
+            self._play_track_by_order_index(nxt)
         else:
             self.player.stop()
             with self.state.lock:
                 self.state.track_title = "Queue finished"
                 self.state.is_paused = True
+        self._notify_render()
 
     def _action_prev_track(self) -> None:
         prev = self.queue.prev_index
         if prev is not None:
-            self._play_track_at(prev)
+            self._play_track_by_order_index(prev)
 
     def _action_volume_up(self) -> None:
         self.player.volume = min(150, self.player.volume + 5)
         with self.state.lock:
             self.state.volume = int(self.player.volume)
+        self._save_volume()
 
     def _action_volume_down(self) -> None:
         self.player.volume = max(0, self.player.volume - 5)
         with self.state.lock:
             self.state.volume = int(self.player.volume)
+        self._save_volume()
+
+    def _save_volume(self) -> None:
+        """Persist the current volume to config.json (non-blocking)."""
+        volume = self.state.volume
+
+        def writer():
+            try:
+                self._config.volume = volume
+                self._config.save()
+            except Exception:
+                pass
+
+        threading.Thread(target=writer, daemon=True, name="config-writer").start()
 
     def _action_seek_forward(self) -> None:
         self.player.seek(10, relative=True)
@@ -526,20 +698,52 @@ class TidalCLI:
                     max_idx, self.state.playlist_cursor + 1
                 )
             else:
-                # Determine list length based on search results mode
-                if self.state.search_results_mode == "artists":
-                    max_idx = max(0, len(self.state.search_results_artists) - 1)
-                elif self.state.search_results_mode == "albums":
-                    max_idx = max(0, len(self.state.search_results_albums) - 1)
-                elif self.state.search_results_mode == "all":
-                    # In "all" mode, combined list: artists + albums + tracks
-                    total = (len(self.state.search_results_artists)
-                             + len(self.state.search_results_albums)
-                             + len(self.state.tracks))
-                    max_idx = max(0, total - 1)
-                else:
-                    max_idx = max(0, len(self.state.tracks) - 1)
+                max_idx = self._max_content_index()
                 self.state.track_cursor = min(max_idx, self.state.track_cursor + 1)
+
+    def _action_page_up(self) -> None:
+        with self.state.lock:
+            if self.state.active_panel == "sidebar":
+                self.state.playlist_cursor = max(0, self.state.playlist_cursor - _PAGE_SIZE)
+            else:
+                self.state.track_cursor = max(0, self.state.track_cursor - _PAGE_SIZE)
+
+    def _action_page_down(self) -> None:
+        with self.state.lock:
+            if self.state.active_panel == "sidebar":
+                max_idx = max(0, len(self.state.playlists) - 1)
+                self.state.playlist_cursor = min(max_idx, self.state.playlist_cursor + _PAGE_SIZE)
+            else:
+                max_idx = self._max_content_index()
+                self.state.track_cursor = min(max_idx, self.state.track_cursor + _PAGE_SIZE)
+
+    def _action_go_home(self) -> None:
+        with self.state.lock:
+            if self.state.active_panel == "sidebar":
+                self.state.playlist_cursor = 0
+            else:
+                self.state.track_cursor = 0
+
+    def _action_go_end(self) -> None:
+        with self.state.lock:
+            if self.state.active_panel == "sidebar":
+                self.state.playlist_cursor = max(0, len(self.state.playlists) - 1)
+            else:
+                self.state.track_cursor = self._max_content_index()
+
+    def _max_content_index(self) -> int:
+        """Return the maximum valid cursor index for the content panel (must be called under lock)."""
+        if self.state.search_results_mode == "artists":
+            return max(0, len(self.state.search_results_artists) - 1)
+        elif self.state.search_results_mode == "albums":
+            return max(0, len(self.state.search_results_albums) - 1)
+        elif self.state.search_results_mode == "all":
+            total = (len(self.state.search_results_artists)
+                     + len(self.state.search_results_albums)
+                     + len(self.state.tracks))
+            return max(0, total - 1)
+        else:
+            return max(0, len(self.state.tracks) - 1)
 
     def _action_focus_sidebar(self) -> None:
         with self.state.lock:
@@ -568,10 +772,10 @@ class TidalCLI:
         with self.state.lock:
             if self.state.active_panel == "content" and self.state.tracks and self.state.track_cursor < len(self.state.tracks):
                 track = self.state.tracks[self.state.track_cursor]
-        
+
         if not track:
             return
-            
+
         track_id = track.id
         with self.state.lock:
             is_fav = track_id in self.state.favorite_track_ids
@@ -582,15 +786,17 @@ class TidalCLI:
             else:
                 self.state.favorite_track_ids.remove(track_id)
                 self.state.status_message = f"Removed {track.title} from favorites"
-                
-        def togger():
+
+        def toggler():
             try:
                 self.tidal.toggle_favorite(track_id, new_fav)
             except Exception as exc:
                 with self.state.lock:
                     self.state.status_message = f"Error: {exc}"
-                    
-        threading.Thread(target=togger, daemon=True, name="favorite-toggler").start()
+            finally:
+                self._notify_render()
+
+        threading.Thread(target=toggler, daemon=True, name="favorite-toggler").start()
 
     def _action_select(self) -> None:
         playlist_to_load: tuple[str, str] | None = None
@@ -654,12 +860,13 @@ class TidalCLI:
 
     def _action_quit(self) -> None:
         self.state.running = False
+        self._notify_render()
 
     # -- Track playback -------------------------------------------------------
 
-    def _play_track_at(self, index: int) -> None:
-        """Resolve stream URL and start playback."""
-        track = self.queue.select(index)
+    def _play_track_at(self, real_index: int) -> None:
+        """Resolve stream URL and start playback by real (absolute) track index."""
+        track = self.queue.select(real_index)
         if not track:
             return
 
@@ -669,29 +876,103 @@ class TidalCLI:
             self.state.is_paused = False
             self.state.position = 0.0
             self.state.duration = track.duration_seconds
+            # Clear old art immediately so the sidebar doesn't show stale art
+            self.state.art_url = None
+            self.state.art_text = None
+        self._gapless_preloading = False
+        self._preloaded_track = None
+        self._notify_render()
+
+        # Kick off art download + render in background
+        threading.Thread(
+            target=self._load_art_async,
+            args=(track,),
+            daemon=True,
+            name="art-loader",
+        ).start()
 
         def resolver():
             try:
                 url = self.tidal.resolve_stream_url(track.id)
                 if url:
-                    self.player.play(url)
+                    # Race condition guard: only play if this track is still selected
                     with self.state.lock:
-                        self.state.track_title = track.display_label
-                        self.state.is_paused = False
+                        still_current = self.state.playing_id == track.id
+                    if still_current:
+                        self.player.play(url)
+                        with self.state.lock:
+                            self.state.track_title = track.display_label
+                            self.state.is_paused = False
+                    # else: user already moved to another track, discard this URL
                 else:
                     with self.state.lock:
-                        self.state.track_title = f"Error: {track.title}"
-                        self.state.is_paused = True
+                        if self.state.playing_id == track.id:
+                            self.state.track_title = f"Error: {track.title}"
+                            self.state.is_paused = True
             except Exception:
                 with self.state.lock:
-                    self.state.track_title = f"Error: {track.title}"
-                    self.state.is_paused = True
+                    if self.state.playing_id == track.id:
+                        self.state.track_title = f"Error: {track.title}"
+                        self.state.is_paused = True
+            finally:
+                self._notify_render()
 
         threading.Thread(target=resolver, daemon=True, name="stream-resolver").start()
+
+    def _load_art_async(self, track) -> None:
+        """Download and render album art in a background thread.
+
+        Tries the Tidal cover URL first. If that fails or is unavailable,
+        queries the iTunes search API.
+        """
+        url = track.album_art_url
+        art = None
+
+        if url:
+            with self.state.lock:
+                if self.state.playing_id == track.id:
+                    self.state.art_url = url
+                else:
+                    return
+            art = render_art(url, width=_ART_WIDTH, height=_ART_HEIGHT)
+
+        # Fallback to iTunes API if Tidal URL is missing or failed to render
+        if not art:
+            from tidal_tui.art_renderer import get_itunes_art_url
+            url = get_itunes_art_url(track.artist, track.album or "", track.title)
+            if url:
+                with self.state.lock:
+                    if self.state.playing_id == track.id:
+                        self.state.art_url = url
+                    else:
+                        return
+                art = render_art(url, width=_ART_WIDTH, height=_ART_HEIGHT)
+
+        if art:
+            with self.state.lock:
+                if self.state.playing_id == track.id and self.state.art_url == url:
+                    self.state.art_text = art
+            self._notify_render()
+
+    def _play_track_by_order_index(self, order_index: int) -> None:
+        """Navigate to a track using its position in the current play order.
+
+        This is used by next/prev/gapless so that shuffle order is respected.
+        """
+        self.queue.current_index = order_index
+        real_idx = self.queue.current_track_real_index
+        if real_idx >= 0:
+            self._play_track_at(real_idx)
 
     # -- Lifecycle ------------------------------------------------------------
 
     def _shutdown(self) -> None:
-        """Clean up resources."""
+        """Clean up resources and save config."""
         self.input.stop()
+        # Persist final volume before exiting
+        try:
+            self._config.volume = self.state.volume
+            self._config.save()
+        except Exception:
+            pass
         self.player.shutdown()

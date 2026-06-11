@@ -32,11 +32,17 @@ class PlayerBackend:
             input_vo_keyboard=False,
         )
         self._user_stopped = False
+        # Set to True once we've queued the next URL for gapless playback,
+        # to avoid queuing it multiple times while remaining time decreases.
+        self._gapless_queued = False
 
         # Callback registries
         self._on_time_change: list[Callable[[float], None]] = []
         self._on_duration_change: list[Callable[[float], None]] = []
         self._on_track_end: list[Callable[[], None]] = []
+        # Fires when playback position is within N seconds of the end.
+        # Signature: callback(remaining_seconds: float)
+        self._on_time_remaining: list[Callable[[float], None]] = []
 
         self._setup_observers()
 
@@ -47,12 +53,25 @@ class PlayerBackend:
 
         @self._player.property_observer("time-pos")
         def _on_time(_name: str, value: float | None) -> None:
-            if value is not None:
-                for cb in self._on_time_change:
-                    try:
-                        cb(value)
-                    except Exception:
-                        pass
+            if value is None:
+                return
+            for cb in self._on_time_change:
+                try:
+                    cb(value)
+                except Exception:
+                    pass
+            # Fire time-remaining callbacks
+            try:
+                dur = self._player.duration
+                if dur and dur > 0:
+                    remaining = dur - value
+                    for cb in self._on_time_remaining:
+                        try:
+                            cb(remaining)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         @self._player.property_observer("duration")
         def _on_duration(_name: str, value: float | None) -> None:
@@ -62,6 +81,11 @@ class PlayerBackend:
                         cb(value)
                     except Exception:
                         pass
+
+        @self._player.event_callback("file-loaded")
+        def _on_file_loaded(_event) -> None:
+            # Reset gapless flag each time a new file starts (including gapless)
+            self._gapless_queued = False
 
         @self._player.event_callback("end-file")
         def _on_end_file(event) -> None:
@@ -90,7 +114,20 @@ class PlayerBackend:
     def play(self, url: str) -> None:
         """Start playing a URL (replaces current track)."""
         self._user_stopped = False
+        self._gapless_queued = False
         self._player.play(url)
+
+    def append_to_queue(self, url: str) -> None:
+        """Append a URL to the internal mpv playlist for gapless playback.
+
+        mpv will seamlessly transition to this URL once the current file ends,
+        with no buffering gap.
+        """
+        try:
+            self._player.command("loadfile", url, "append-play")
+            self._gapless_queued = True
+        except Exception:
+            pass
 
     def stop(self) -> None:
         """Stop playback without triggering track-end callbacks."""
@@ -185,6 +222,10 @@ class PlayerBackend:
     def on_track_end(self, callback: Callable[[], None]) -> None:
         """Register a callback for when a track finishes naturally."""
         self._on_track_end.append(callback)
+
+    def on_time_remaining(self, callback: Callable[[float], None]) -> None:
+        """Register a callback that fires with remaining seconds on each position update."""
+        self._on_time_remaining.append(callback)
 
     # -- Lifecycle ------------------------------------------------------------
 

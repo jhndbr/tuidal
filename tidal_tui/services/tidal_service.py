@@ -10,6 +10,7 @@ import tidalapi
 import tidalapi.album as tidal_album
 import tidalapi.artist as tidal_artist
 
+from tidal_tui.cache import MetadataCache
 from tidal_tui.config import load_session_tokens, save_session_tokens
 from tidal_tui.models import AlbumInfo, ArtistInfo, PlaylistInfo, SearchType, TrackInfo
 
@@ -58,6 +59,7 @@ class TidalService:
         tidal_quality = _QUALITY_MAP.get(quality, _DEFAULT_QUALITY)
         config = tidalapi.Config(quality=tidal_quality)
         self._session = tidalapi.Session(config)
+        self._cache = MetadataCache()
 
     # -- Authentication -------------------------------------------------------
 
@@ -134,7 +136,11 @@ class TidalService:
     # -- Tracks ---------------------------------------------------------------
 
     def get_playlist_tracks(self, playlist_id: str) -> list[TrackInfo]:
-        """Fetch all tracks for a given playlist."""
+        """Fetch all tracks for a given playlist (cache-first)."""
+        cached = self._cache.get_playlist_tracks(playlist_id)
+        if cached is not None:
+            return cached
+
         result: list[TrackInfo] = []
         try:
             playlist = self._get_playlist(playlist_id)
@@ -143,13 +149,19 @@ class TidalService:
                 result.append(self._track_to_info(track, i))
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch tracks: {exc}") from exc
+
+        self._cache.set_playlist_tracks(playlist_id, result)
         return result
 
     def search_tracks(self, query: str, limit: int = 50) -> list[TrackInfo]:
-        """Search for tracks matching the query."""
+        """Search for tracks matching the query (cache-first)."""
         if not query:
             return []
-        
+
+        cached = self._cache.get_search_results(query, "tracks")
+        if cached is not None:
+            return cached.get("tracks", [])
+
         result: list[TrackInfo] = []
         try:
             search_result = self._session.search(query, models=[tidalapi.media.Track], limit=limit)
@@ -158,12 +170,18 @@ class TidalService:
                 result.append(self._track_to_info(track, i))
         except Exception as exc:
             raise RuntimeError(f"Search failed: {exc}") from exc
+
+        self._cache.set_search_results(query, "tracks", {"tracks": result, "artists": [], "albums": []})
         return result
 
     def search_artists(self, query: str, limit: int = 30) -> list[ArtistInfo]:
-        """Search for artists matching the query."""
+        """Search for artists matching the query (cache-first)."""
         if not query:
             return []
+
+        cached = self._cache.get_search_results(query, "artists")
+        if cached is not None:
+            return cached.get("artists", [])
 
         result: list[ArtistInfo] = []
         try:
@@ -184,12 +202,18 @@ class TidalService:
                 )
         except Exception as exc:
             raise RuntimeError(f"Artist search failed: {exc}") from exc
+
+        self._cache.set_search_results(query, "artists", {"tracks": [], "artists": result, "albums": []})
         return result
 
     def search_albums(self, query: str, limit: int = 30) -> list[AlbumInfo]:
-        """Search for albums matching the query."""
+        """Search for albums matching the query (cache-first)."""
         if not query:
             return []
+
+        cached = self._cache.get_search_results(query, "albums")
+        if cached is not None:
+            return cached.get("albums", [])
 
         result: list[AlbumInfo] = []
         try:
@@ -205,6 +229,8 @@ class TidalService:
                 result.append(self._album_to_info(album))
         except Exception as exc:
             raise RuntimeError(f"Album search failed: {exc}") from exc
+
+        self._cache.set_search_results(query, "albums", {"tracks": [], "artists": [], "albums": result})
         return result
 
     def search_all(
@@ -243,7 +269,11 @@ class TidalService:
             raise RuntimeError(f"Search failed: {exc}") from exc
 
     def get_artist_top_tracks(self, artist_id: str, limit: int = 50) -> list[TrackInfo]:
-        """Fetch the top tracks for an artist."""
+        """Fetch the top tracks for an artist (cache-first)."""
+        cached = self._cache.get_artist_tracks(artist_id)
+        if cached is not None:
+            return cached
+
         result: list[TrackInfo] = []
         try:
             artist = self._session.artist(artist_id)
@@ -252,10 +282,16 @@ class TidalService:
                 result.append(self._track_to_info(track, i))
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch artist tracks: {exc}") from exc
+
+        self._cache.set_artist_tracks(artist_id, result)
         return result
 
     def get_album_tracks(self, album_id: str) -> list[TrackInfo]:
-        """Fetch all tracks from an album."""
+        """Fetch all tracks from an album (cache-first)."""
+        cached = self._cache.get_album_tracks(album_id)
+        if cached is not None:
+            return cached
+
         result: list[TrackInfo] = []
         try:
             album = self._session.album(album_id)
@@ -264,6 +300,8 @@ class TidalService:
                 result.append(self._track_to_info(track, i))
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch album tracks: {exc}") from exc
+
+        self._cache.set_album_tracks(album_id, result)
         return result
 
     def get_favorite_tracks(self) -> list[TrackInfo]:
@@ -346,8 +384,24 @@ class TidalService:
                 pass
 
         album_name = ""
+        art_url = None
         if hasattr(track, "album") and track.album is not None:
-            album_name = getattr(track.album, "name", "")
+            album = track.album
+            album_name = getattr(album, "name", "")
+            # Try method .image(dimensions) first (tidalapi >= 0.7)
+            if hasattr(album, "image") and callable(album.image):
+                try:
+                    art_url = album.image(320)
+                except Exception:
+                    pass
+            # Fallback: construct from picture UUID (tidalapi < 0.7)
+            if not art_url:
+                pic = getattr(album, "picture", None)
+                if isinstance(pic, str) and pic:
+                    art_url = (
+                        "https://resources.tidal.com/images/"
+                        f"{pic.replace('-', '/')}/320x320.jpg"
+                    )
 
         duration = getattr(track, "duration", 0) or 0
 
@@ -360,7 +414,9 @@ class TidalService:
             album=album_name,
             duration_seconds=float(duration),
             track_number=index,
+            album_art_url=art_url,
         )
+
 
     @staticmethod
     def _album_to_info(album) -> AlbumInfo:
