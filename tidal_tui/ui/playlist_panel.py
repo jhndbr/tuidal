@@ -1,13 +1,19 @@
 """Playlist panel renderer — scrollable list of playlists with cursor highlight."""
 from __future__ import annotations
 
+from rich.cells import cell_len
 from rich.text import Text
 
 from tidal_tui.models import PlaylistInfo
 
-# Inner usable width of the sidebar panel.
-# Sidebar column = 30, minus 2 border chars = 28, minus 2 padding chars = 26.
-_INNER_WIDTH = 26
+# Usable cell width inside the sidebar panel.
+# Sidebar column = 30, minus 2 border chars (ROUNDED box) = 28 inner cells.
+_INNER_WIDTH = 28
+
+
+def _strip_wide(text: str) -> str:
+    """Remove any character that occupies more than 1 terminal cell (emoji, CJK…)."""
+    return "".join(ch for ch in text if cell_len(ch) == 1)
 
 
 def render_playlist_panel(
@@ -24,14 +30,13 @@ def render_playlist_panel(
         cursor:    Currently highlighted index.
         active:    Whether this panel has focus.
         error:     Error message to display when playlists failed to load.
-        max_rows:  Maximum rows to use for the list.  When set the list
-                   scrolls to keep the cursor visible.
+        max_rows:  Maximum rows to use for the list.
     """
     result = Text()
 
     if not playlists and error:
         result.append("  ⚠ Error\n", style="warning")
-        short = error if len(error) <= 60 else error[:57] + "…"
+        short = error[:60] + "…" if len(error) > 60 else error
         result.append(f"  {short}\n\n", style="dim")
         result.append("  Press ", style="dim")
         result.append("/", style="bold cyan")
@@ -45,7 +50,7 @@ def render_playlist_panel(
         result.append("  Loading…", style="dim")
         return result
 
-    # -- Viewport: line-by-line scroll (cursor near bottom edge when scrolling down)
+    # -- Viewport: line-by-line scroll -----------------------------------------
     total_len = len(playlists)
     if max_rows is not None and total_len > max_rows:
         start = max(0, cursor - max_rows + 1)
@@ -59,38 +64,40 @@ def render_playlist_panel(
     for idx_in_visible, (i, pl) in enumerate(visible):
         is_cursor = i == cursor
 
-        # Build icon + name portion
-        icon = "▶" if is_cursor else " "
+        # Strip wide chars so len() == display width for the rest of the row
+        name = _strip_wide(pl.name)
 
-        # Truncate name to leave room for count badge
+        # Count badge (pure ASCII, len == display width)
         count_str = f" {pl.num_tracks}" if pl.num_tracks else ""
-        # Max name length = inner width - icon(1) - space(1) - count(len) - margin(1)
-        max_name = _INNER_WIDTH - 3 - len(count_str)
-        name = pl.name if len(pl.name) <= max_name else pl.name[: max_name - 1] + "…"
+        count_w = len(count_str)
 
-        line = Text(overflow="crop", no_wrap=True)
+        # " ▶ " or "   " → 3 cells (all single-width)
+        prefix_w = 3
+        max_name = _INNER_WIDTH - prefix_w - count_w
+
+        if len(name) > max_name:
+            name = name[: max_name - 1] + "…"
+
+        # Pad name to fill exactly max_name cells
+        name = name.ljust(max_name)
+
+        line = Text(no_wrap=True)
 
         if is_cursor and active:
-            # Active focus: bright highlight
-            line.append(f" {icon} ", style="bold cyan")
+            line.append(" ▶ ", style="bold cyan")
             line.append(name, style="bold white")
             if count_str:
                 line.append(count_str, style="bold bright_black")
         elif is_cursor:
-            # Panel unfocused but cursor row
-            line.append(f" {icon} ", style="white")
+            line.append(" ▶ ", style="white")
             line.append(name, style="white")
             if count_str:
                 line.append(count_str, style="bright_black")
         else:
-            # Normal row
-            line.append("   ", style="")
+            line.append("   ")
             line.append(name, style="bright_black")
             if count_str:
                 line.append(count_str, style="bright_black")
-
-        # Pad to full inner width so the highlight bar fills the whole row
-        line.pad_right(_INNER_WIDTH)
 
         result.append(line)
         if idx_in_visible < len(visible) - 1:

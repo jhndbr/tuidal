@@ -2,11 +2,14 @@
 
 Captures single keypresses without blocking the main rendering loop.
 Keys are placed into a queue.Queue for the main thread to consume.
+The caller can pass a threading.Event that gets set on every keypress
+so the render loop wakes up immediately without polling.
 """
 from __future__ import annotations
 
 import threading
 from queue import Empty, Queue
+from typing import Optional
 
 import readchar
 
@@ -16,7 +19,7 @@ class InputListener:
 
     Usage::
 
-        listener = InputListener()
+        listener = InputListener(render_event)
         listener.start()
 
         # In your main loop:
@@ -26,10 +29,11 @@ class InputListener:
         listener.stop()
     """
 
-    def __init__(self) -> None:
+    def __init__(self, render_event: Optional[threading.Event] = None) -> None:
         self._queue: Queue[str] = Queue()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._render_event = render_event
 
     def start(self) -> None:
         """Start the input listener thread."""
@@ -60,8 +64,9 @@ class InputListener:
             try:
                 key = readchar.readkey()
                 self._queue.put(key)
-                if key == "q":  # we still need a hard break if needed, but let's just keep reading until stopped. Wait, 'q' might not quit if searching.
-                    pass
+                # Wake the render loop immediately on every keypress
+                if self._render_event is not None:
+                    self._render_event.set()
             except Exception:
                 break
 

@@ -155,12 +155,10 @@ class TidalCLI:
         self.player = PlayerBackend()
         self.queue = QueueState()
         self.state = AppState()
-        self.input = InputListener()
+        self._render_event: threading.Event = threading.Event()
+        self.input = InputListener(render_event=self._render_event)
         self._quality = quality
         self._config = config or AppConfig()
-
-        # Event that wakes the render loop — set by inputs, loaders and position changes.
-        self._render_event: threading.Event = threading.Event()
 
         # Timestamp of the last position-change render trigger (throttle to 1/s)
         self._last_position_render: float = 0.0
@@ -200,7 +198,7 @@ class TidalCLI:
             ) as live:
                 while self.state.running:
                     # Block until there's something to render (or timeout safety net)
-                    self._render_event.wait(timeout=0.25)
+                    self._render_event.wait(timeout=0.1)
                     self._render_event.clear()
 
                     # Process all pending keyboard input
@@ -544,8 +542,8 @@ class TidalCLI:
             if action:
                 self._handle_action(action)
 
-        # Every keystroke unconditionally triggers a render
-        self._notify_render()
+        # No need to call _notify_render() here: the main loop renders
+        # unconditionally after draining all keys in each cycle.
 
     def _handle_search_key(self, key: str) -> None:
         """Process keys while in search mode.
