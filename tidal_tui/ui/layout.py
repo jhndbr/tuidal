@@ -121,8 +121,8 @@ def build_layout(state: AppState, term_height: int = 24) -> Layout:
     else:
         playlists_layout_height = main_height
 
-    # Panel overhead: top-border(1) + padding-top(1) + padding-bottom(1) + bottom-border(1) = 4
-    max_playlist_rows = max(1, playlists_layout_height - 4)
+    # Panel overhead: top-border(1) + bottom-border(1) = 2  (no padding)
+    max_playlist_rows = max(1, playlists_layout_height - 2)
 
     playlist_content = render_playlist_panel(
         playlists=state.playlists,
@@ -138,7 +138,7 @@ def build_layout(state: AppState, term_height: int = 24) -> Layout:
             title_align="left",
             border_style="sidebar.title" if state.active_panel == "sidebar" else "border",
             box=box.ROUNDED,
-            padding=(1, 0),
+            padding=(0, 0),
         )
     )
 

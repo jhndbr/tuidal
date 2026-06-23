@@ -5,6 +5,10 @@ from rich.text import Text
 
 from tidal_tui.models import PlaylistInfo
 
+# Inner usable width of the sidebar panel.
+# Sidebar column = 30, minus 2 border chars = 28, minus 2 padding chars = 26.
+_INNER_WIDTH = 26
+
 
 def render_playlist_panel(
     playlists: list[PlaylistInfo],
@@ -13,7 +17,7 @@ def render_playlist_panel(
     error: str = "",
     max_rows: int | None = None,
 ) -> Text:
-    """Render the playlist list with cursor highlighting and scrollbar.
+    """Render the playlist list with cursor highlighting (no scrollbar).
 
     Args:
         playlists: Available playlists.
@@ -27,7 +31,7 @@ def render_playlist_panel(
 
     if not playlists and error:
         result.append("  ⚠ Error\n", style="warning")
-        short = error if len(error) <= 70 else error[:67] + "..."
+        short = error if len(error) <= 60 else error[:57] + "…"
         result.append(f"  {short}\n\n", style="dim")
         result.append("  Press ", style="dim")
         result.append("/", style="bold cyan")
@@ -38,55 +42,55 @@ def render_playlist_panel(
         return result
 
     if not playlists:
-        result.append("  Loading...", style="dim")
+        result.append("  Loading…", style="dim")
         return result
 
-    # -- Viewport: scroll to keep cursor in view ------------------------------
+    # -- Viewport: line-by-line scroll (cursor near bottom edge when scrolling down)
     total_len = len(playlists)
     if max_rows is not None and total_len > max_rows:
-        half = max_rows // 2
-        start = max(0, cursor - half)
+        start = max(0, cursor - max_rows + 1)
         start = min(start, total_len - max_rows)
-        visible = list(enumerate(playlists))[start : start + max_rows]
-
-        # Calculate scrollbar details
-        thumb_height = max(1, int(max_rows * max_rows / total_len))
-        max_start = total_len - max_rows
-        if max_start > 0:
-            thumb_start = int(start * (max_rows - thumb_height) / max_start)
-        else:
-            thumb_start = 0
     else:
-        visible = list(enumerate(playlists))
         start = 0
         max_rows = total_len
 
+    visible = list(enumerate(playlists))[start : start + max_rows]
+
     for idx_in_visible, (i, pl) in enumerate(visible):
-        count = f" ({pl.num_tracks})" if pl.num_tracks else ""
-        label = f"  {'▸' if i == cursor else '◦'} {pl.name}{count}"
+        is_cursor = i == cursor
 
-        line = Text()
-        if i == cursor and active:
-            line.append(label, style="sidebar.selected")
-        elif i == cursor:
-            line.append(label, style="sidebar.hover")
+        # Build icon + name portion
+        icon = "▶" if is_cursor else " "
+
+        # Truncate name to leave room for count badge
+        count_str = f" {pl.num_tracks}" if pl.num_tracks else ""
+        # Max name length = inner width - icon(1) - space(1) - count(len) - margin(1)
+        max_name = _INNER_WIDTH - 3 - len(count_str)
+        name = pl.name if len(pl.name) <= max_name else pl.name[: max_name - 1] + "…"
+
+        line = Text(overflow="crop", no_wrap=True)
+
+        if is_cursor and active:
+            # Active focus: bright highlight
+            line.append(f" {icon} ", style="bold cyan")
+            line.append(name, style="bold white")
+            if count_str:
+                line.append(count_str, style="bold bright_black")
+        elif is_cursor:
+            # Panel unfocused but cursor row
+            line.append(f" {icon} ", style="white")
+            line.append(name, style="white")
+            if count_str:
+                line.append(count_str, style="bright_black")
         else:
-            line.append(label, style="sidebar.item")
+            # Normal row
+            line.append("   ", style="")
+            line.append(name, style="bright_black")
+            if count_str:
+                line.append(count_str, style="bright_black")
 
-        # Sidebar width is 30. Inner width is 28 (borders).
-        # We pad the label to 26 cells to leave 1 cell for scrollbar and 1 cell for padding.
-        line.truncate(26)
-        line.pad_right(26)
-
-        # Append scrollbar or spacing
-        if max_rows is not None and total_len > max_rows:
-            is_thumb = (thumb_start <= idx_in_visible < thumb_start + thumb_height)
-            if is_thumb:
-                line.append("█", style="bold cyan")
-            else:
-                line.append("│", style="bright_black")
-        else:
-            line.append(" ")
+        # Pad to full inner width so the highlight bar fills the whole row
+        line.pad_right(_INNER_WIDTH)
 
         result.append(line)
         if idx_in_visible < len(visible) - 1:

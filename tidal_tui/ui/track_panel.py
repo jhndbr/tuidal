@@ -35,8 +35,7 @@ def _render_artist_table(
     is_scrollable = max_rows and total_len > max_rows
 
     if is_scrollable:
-        half = max_rows // 2
-        start = max(0, cursor - half)
+        start = max(0, cursor - max_rows + 1)
         start = min(start, total_len - max_rows)
         end = start + max_rows
         visible = list(enumerate(artists))[start:end]
@@ -120,8 +119,7 @@ def _render_album_table(
     is_scrollable = max_rows and total_len > max_rows
 
     if is_scrollable:
-        half = max_rows // 2
-        start = max(0, cursor - half)
+        start = max(0, cursor - max_rows + 1)
         start = min(start, total_len - max_rows)
         end = start + max_rows
         visible = list(enumerate(albums))[start:end]
@@ -224,8 +222,7 @@ def _render_all_results_table(
     is_scrollable = max_rows and total_len > max_rows
 
     if is_scrollable:
-        half = max_rows // 2
-        start = max(0, cursor - half)
+        start = max(0, cursor - max_rows + 1)
         start = min(start, total_len - max_rows)
         end = start + max_rows
         visible = list(enumerate(rows))[start:end]
@@ -373,8 +370,7 @@ def render_track_table(
     is_scrollable = max_rows and total_len > max_rows
 
     if is_scrollable:
-        half = max_rows // 2
-        start = max(0, cursor - half)
+        start = max(0, cursor - max_rows + 1)
         start = min(start, total_len - max_rows)
         end = start + max_rows
         visible = list(enumerate(tracks))[start:end]
