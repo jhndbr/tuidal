@@ -90,6 +90,7 @@ class AppState:
     playlists: list = field(default_factory=list)
     playlist_name: str = ""
     playlist_cursor: int = 0
+    loading_playlist_id: str = ""
     sidebar_error: str = ""  # error message shown in sidebar
 
     # -- Tracks
@@ -328,13 +329,16 @@ class TidalCLI:
                 from tidal_tui.models import PlaylistInfo
 
                 loaded_playlists: list = []
-                fav_tracks: list = []
 
-                # Fetch favorites (non-fatal if it fails)
+                # Fetch just the favorites COUNT with a single lightweight request
+                # so the sidebar shows the correct number without downloading all tracks.
+                fav_count = 0
                 try:
-                    fav_tracks = self.tidal.get_favorite_tracks()
+                    favs = getattr(self.tidal.session.user, "favorites", None)
+                    if favs and hasattr(favs, "get_tracks_count"):
+                        fav_count = favs.get_tracks_count()
                 except Exception:
-                    pass
+                    fav_count = 0
 
                 # Fetch playlists (non-fatal if it fails)
                 playlists_error = ""
@@ -343,21 +347,20 @@ class TidalCLI:
                 except Exception as exc:
                     playlists_error = str(exc)
 
-                # Build the final list — always add favorites if we have them
+                # Build the final list — always add favorites entry at the top
                 final: list = []
-                if fav_tracks:
-                    fav_playlist = PlaylistInfo(
-                        id="__favorites__",
-                        name="♥ Favoritas",
-                        num_tracks=len(fav_tracks),
-                        description="Tus canciones favoritas",
-                    )
-                    final.append(fav_playlist)
+                fav_playlist = PlaylistInfo(
+                    id="__favorites__",
+                    name="♥ Favoritas",
+                    num_tracks=fav_count,
+                    description="Tus canciones favoritas",
+                )
+                final.append(fav_playlist)
                 final.extend(loaded_playlists)
 
                 with self.state.lock:
                     self.state.playlists = final
-                    self.state.favorite_track_ids = {t.id for t in fav_tracks}
+                    self.state.favorite_track_ids = set()  # populated below in background
                     if final:
                         self.state.sidebar_error = ""
                         self.state.status_message = f"Loaded {len(loaded_playlists)} playlists"
@@ -367,6 +370,23 @@ class TidalCLI:
                     else:
                         self.state.sidebar_error = ""
                         self.state.status_message = "No playlists found"
+
+                # Populate favorite_track_ids in background (cache-first — usually instant)
+                def _load_fav_ids():
+                    try:
+                        fav_tracks = self.tidal.get_favorite_tracks()
+                        with self.state.lock:
+                            self.state.favorite_track_ids = {t.id for t in fav_tracks}
+                            # Also update the num_tracks counter now we have the real total
+                            for pl in self.state.playlists:
+                                if pl.id == "__favorites__":
+                                    pl.num_tracks = len(fav_tracks)
+                                    break
+                        self._notify_render()
+                    except Exception:
+                        pass
+
+                threading.Thread(target=_load_fav_ids, daemon=True, name="fav-ids-loader").start()
 
             except Exception as exc:
                 with self.state.lock:
@@ -380,27 +400,55 @@ class TidalCLI:
     def _load_tracks_async(self, playlist_id: str, playlist_name: str) -> None:
         """Load tracks for a playlist in a background thread."""
         with self.state.lock:
+            self.state.loading_playlist_id = playlist_id
             self.state.status_message = f"Loading {playlist_name}..."
         self._notify_render()
 
         def loader():
             try:
                 if playlist_id == "__favorites__":
-                    tracks = self.tidal.get_favorite_tracks()
+                    loaded_tracks = []
+
+                    def on_chunk(chunk: list) -> bool:
+                        with self.state.lock:
+                            still_current = (self.state.loading_playlist_id == playlist_id)
+                        if not still_current:
+                            return False  # Abort fetching
+
+                        loaded_tracks.extend(chunk)
+                        with self.state.lock:
+                            self.state.tracks = list(loaded_tracks)
+                            self.state.playlist_name = playlist_name
+                            self.state.search_results_mode = ""
+                            self.state.search_results_artists = []
+                            self.state.search_results_albums = []
+                            self.state.status_message = f"Loaded {len(loaded_tracks)} favorites..."
+                        self.queue.set_tracks(list(loaded_tracks))
+                        self._notify_render()
+                        return True
+
+                    self.tidal.get_favorite_tracks_incremental(on_chunk)
+
+                    with self.state.lock:
+                        if self.state.loading_playlist_id == playlist_id:
+                            self.state.status_message = ""
+                    self._notify_render()
                 else:
                     tracks = self.tidal.get_playlist_tracks(playlist_id)
-                with self.state.lock:
-                    self.state.tracks = tracks
-                    self.state.track_cursor = 0
-                    self.state.playlist_name = playlist_name
-                    self.state.search_results_mode = ""
-                    self.state.search_results_artists = []
-                    self.state.search_results_albums = []
-                    self.state.status_message = ""
-                self.queue.set_tracks(tracks)
+                    with self.state.lock:
+                        if self.state.loading_playlist_id == playlist_id:
+                            self.state.tracks = tracks
+                            self.state.track_cursor = 0
+                            self.state.playlist_name = playlist_name
+                            self.state.search_results_mode = ""
+                            self.state.search_results_artists = []
+                            self.state.search_results_albums = []
+                            self.state.status_message = ""
+                    self.queue.set_tracks(tracks)
             except Exception as exc:
                 with self.state.lock:
-                    self.state.status_message = f"Error: {exc}"
+                    if self.state.loading_playlist_id == playlist_id:
+                        self.state.status_message = f"Error: {exc}"
             finally:
                 self._notify_render()
 
@@ -788,6 +836,14 @@ class TidalCLI:
         def toggler():
             try:
                 self.tidal.toggle_favorite(track_id, new_fav)
+                # Invalidate the favorites cache so the next visit re-fetches all tracks
+                self.tidal.invalidate_favorite_tracks_cache()
+                # Update num_tracks counter in the sidebar for the __favorites__ playlist
+                with self.state.lock:
+                    for pl in self.state.playlists:
+                        if pl.id == "__favorites__":
+                            pl.num_tracks += 1 if new_fav else -1
+                            break
             except Exception as exc:
                 with self.state.lock:
                     self.state.status_message = f"Error: {exc}"

@@ -23,6 +23,7 @@ from tidal_tui.models import AlbumInfo, ArtistInfo, TrackInfo
 # Default time-to-live in seconds
 _TTL_TRACKS: int = 300   # 5 minutes
 _TTL_SEARCH: int = 120   # 2 minutes
+_TTL_FAVORITES: int = 600  # 10 minutes
 
 _DB_PATH = Path.home() / ".config" / "tidal-tui" / "cache.db"
 
@@ -46,6 +47,12 @@ CREATE TABLE IF NOT EXISTS album_cache (
 );
 
 CREATE TABLE IF NOT EXISTS search_cache (
+    key        TEXT PRIMARY KEY,
+    data_json  TEXT NOT NULL,
+    fetched_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS favorites_cache (
     key        TEXT PRIMARY KEY,
     data_json  TEXT NOT NULL,
     fetched_at REAL NOT NULL
@@ -154,6 +161,30 @@ class MetadataCache:
     def invalidate_playlist(self, playlist_id: str) -> None:
         """Force-expire a playlist's cached tracks."""
         self._delete("track_cache", f"playlist:{playlist_id}")
+
+    # -- Favorites cache ------------------------------------------------------
+
+    def get_favorite_tracks(self, order: str = "DATE", direction: str = "DESC") -> list[TrackInfo] | None:
+        """Return all cached favorite tracks for a given order, or None if missing/expired."""
+        key = f"favorites:{order}:{direction}"
+        row = self._get("favorites_cache", key, _TTL_FAVORITES)
+        if row is None:
+            return None
+        return [TrackInfo(**t) for t in json.loads(row)]
+
+    def set_favorite_tracks(self, tracks: list[TrackInfo], order: str = "DATE", direction: str = "DESC") -> None:
+        """Store the full list of favorite tracks in cache with order key."""
+        key = f"favorites:{order}:{direction}"
+        data = json.dumps([_track_to_dict(t) for t in tracks])
+        self._set("favorites_cache", key, data)
+
+    def invalidate_favorite_tracks(self) -> None:
+        """Force-expire all cached favorites (e.g. after toggling a favorite)."""
+        try:
+            with self._connect() as conn:
+                conn.execute("DELETE FROM favorites_cache")
+        except sqlite3.Error:
+            pass
 
     def clear_expired(self) -> None:
         """Remove all expired entries from every table."""

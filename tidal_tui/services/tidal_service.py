@@ -9,6 +9,7 @@ from __future__ import annotations
 import tidalapi
 import tidalapi.album as tidal_album
 import tidalapi.artist as tidal_artist
+from tidalapi.types import ItemOrder, OrderDirection
 
 from tidal_tui.cache import MetadataCache
 from tidal_tui.config import load_session_tokens, save_session_tokens
@@ -305,16 +306,118 @@ class TidalService:
         return result
 
     def get_favorite_tracks(self) -> list[TrackInfo]:
-        """Fetch user's favorite tracks."""
+        """Fetch ALL of the user's favorite tracks using pagination.
+
+        Uses the tidalapi ``tracks_paginated()`` helper which fires parallel
+        requests (2 workers × batches of 50) so even large collections load
+        quickly.  Falls back to a manual offset loop if the paginated helper
+        is unavailable (older tidalapi versions).
+        """
+        # Cache-first: avoid re-fetching on every sidebar load
+        cached = self._cache.get_favorite_tracks(order="DATE", direction="DESC")
+        if cached is not None:
+            return cached
+
         result: list[TrackInfo] = []
         try:
-            if hasattr(self._session.user, "favorites") and self._session.user.favorites:
-                raw_tracks = self._session.user.favorites.tracks()
-                for i, track in enumerate(raw_tracks, start=1):
-                    result.append(self._track_to_info(track, i))
+            favs = getattr(self._session.user, "favorites", None)
+            if not favs:
+                return result
+
+            # Prefer the fully-paginated helper (tidalapi >= 0.8)
+            if hasattr(favs, "tracks_paginated"):
+                raw_tracks = favs.tracks_paginated(
+                    order=ItemOrder.Date,
+                    order_direction=OrderDirection.Descending
+                )
+            else:
+                # Manual pagination: chunk by 50 until the API returns nothing
+                raw_tracks = []
+                limit = 50
+                offset = 0
+                while True:
+                    page = favs.tracks(
+                        limit=limit,
+                        offset=offset,
+                        order=ItemOrder.Date,
+                        order_direction=OrderDirection.Descending
+                    )
+                    if not page:
+                        break
+                    raw_tracks.extend(page)
+                    if len(page) < limit:
+                        break
+                    offset += limit
+
+            for i, track in enumerate(raw_tracks, start=1):
+                result.append(self._track_to_info(track, i))
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch favorites: {exc}") from exc
+
+        self._cache.set_favorite_tracks(result, order="DATE", direction="DESC")
         return result
+
+    def get_favorite_tracks_incremental(
+        self,
+        chunk_callback: Callable[[list[TrackInfo]], bool]
+    ) -> list[TrackInfo]:
+        """Fetch the user's favorite tracks incrementally in chunks.
+
+        Calls `chunk_callback` with each chunk. If `chunk_callback` returns False,
+        aborts the loading process.
+
+        Returns the full list of tracks loaded so far.
+        """
+        cached = self._cache.get_favorite_tracks(order="DATE", direction="DESC")
+        if cached is not None:
+            # If cached, return everything at once via callback
+            chunk_callback(cached)
+            return cached
+
+        result: list[TrackInfo] = []
+        try:
+            favs = getattr(self._session.user, "favorites", None)
+            if not favs:
+                return result
+
+            limit = 50
+            offset = 0
+            track_index = 1
+            while True:
+                page = favs.tracks(
+                    limit=limit,
+                    offset=offset,
+                    order=ItemOrder.Date,
+                    order_direction=OrderDirection.Descending
+                )
+                if not page:
+                    break
+
+                chunk: list[TrackInfo] = []
+                for track in page:
+                    chunk.append(self._track_to_info(track, track_index))
+                    track_index += 1
+
+                result.extend(chunk)
+
+                # Send chunk to callback. If callback returns False, abort.
+                if not chunk_callback(chunk):
+                    break
+
+                if len(page) < limit:
+                    break
+                offset += limit
+
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch favorites incrementally: {exc}") from exc
+
+        if result:
+            self._cache.set_favorite_tracks(result, order="DATE", direction="DESC")
+        return result
+
+    def invalidate_favorite_tracks_cache(self) -> None:
+        """Invalidate the favorites cache (call after toggling a favorite)."""
+        self._cache.invalidate_favorite_tracks()
 
     def toggle_favorite(self, track_id: str, is_favorite: bool) -> None:
         """Add or remove a track from favorites."""
